@@ -1,7 +1,11 @@
 """
 database/db.py
 ──────────────
-SQLAlchemy engine setup — SQLite version (no server required).
+SQLAlchemy engine setup — supports both SQLite (local dev) and PostgreSQL (Supabase).
+
+Set DATABASE_URL env var to switch:
+  - SQLite (default):  sqlite:///./metro.db
+  - Supabase:          postgresql://postgres.[ref]:[pass]@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
 """
 
 import os
@@ -21,17 +25,18 @@ DATABASE_URL: str = os.getenv(
     f"sqlite:///{_project_root / 'metro.db'}",
 )
 
-# SQLite needs check_same_thread=False for FastAPI's thread-per-request model
-_connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+_is_sqlite = DATABASE_URL.startswith("sqlite")
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=_connect_args,
-    echo=False,
-)
+# ── Engine configuration ─────────────────────────────────────────────────────
+if _is_sqlite:
+    # SQLite needs check_same_thread=False for FastAPI's thread-per-request model
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
 
-# Enable WAL mode + busy timeout for SQLite so concurrent requests don't deadlock
-if DATABASE_URL.startswith("sqlite"):
+    # Enable WAL mode + busy timeout for SQLite so concurrent requests don't deadlock
     from sqlalchemy import event
 
     @event.listens_for(engine, "connect")
@@ -40,6 +45,18 @@ if DATABASE_URL.startswith("sqlite"):
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA busy_timeout=30000")   # 30 s
         cursor.close()
+
+else:
+    # PostgreSQL (Supabase / Railway / local pg) — connection pooling
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=1800,    # recycle connections every 30 min
+        pool_pre_ping=True,   # verify connections before using
+        echo=False,
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
