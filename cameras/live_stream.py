@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 from database.db import SessionLocal
-from database.queries import log_sighting
+from database.queries import log_sighting, check_watchlist_alert
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +521,12 @@ class LiveStream:
                                 zone_id=self.zone_id,
                                 camera_id=self.camera_id,
                                 confidence=conf,
+                                db=db,
+                            )
+                            check_watchlist_alert(
+                                unique_code=code,
+                                camera_id=self.camera_id,
+                                location_id=self.location_id,
                                 db=db,
                             )
                         except Exception as exc:

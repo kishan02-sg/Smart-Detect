@@ -631,10 +631,6 @@ class CameraProcessor:
         self._auth_headers = {}
         return False
 
-    def _call_api_match(self, embedding: np.ndarray) -> Optional[str]:
-        """POST embedding to /identify endpoint (production)."""
-        return None  # Implement: POST embedding → unique_code
-
     def _maybe_log_sighting(self, unique_code: str, confidence: float) -> None:
         """Post a sighting with cooldown enforcement."""
         reg_key = next(

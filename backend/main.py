@@ -38,11 +38,14 @@ from typing import Any, Dict, List, Optional, Union
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+
+import time as _time
+from collections import defaultdict
 
 from database.db import get_db, init_db
 from database.models import Location, Person, Camera as CameraModel
@@ -80,6 +83,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Rate Limiting (in-memory, no external dependency) ───────────────────────
+_rate_buckets: Dict[str, List[float]] = defaultdict(list)
+
+def _check_rate_limit(request: Request, max_calls: int, window_seconds: int) -> None:
+    client_ip = request.client.host if request.client else "unknown"
+    key = f"{request.url.path}:{client_ip}"
+    now = _time.time()
+    hits = _rate_buckets[key]
+    _rate_buckets[key] = [t for t in hits if now - t < window_seconds]
+    if len(_rate_buckets[key]) >= max_calls:
+        raise HTTPException(status_code=429, detail="Too many requests. Please try again later.")
+    _rate_buckets[key].append(now)
 
 # ─── Global camera state ─────────────────────────────────────────────────────
 # camera_id → LiveStream instance  (max 4 simultaneous)
@@ -222,7 +238,8 @@ class CameraCreateRequest(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/auth/login", response_model=LoginResponse, tags=["Auth"])
-def login(payload: LoginRequest) -> LoginResponse:
+def login(request: Request, payload: LoginRequest) -> LoginResponse:
+    _check_rate_limit(request, max_calls=10, window_seconds=60)
     result = _auth_login(payload)
     logger.info("auth.login", message=f"Login by user='{payload.username}' role='{result.role}'")
     return result
@@ -243,10 +260,12 @@ def health_check() -> Dict[str, str]:
 
 @app.post("/register", response_model=RegisterResponse, tags=["Person"])
 def register(
+    request: Request,
     payload: RegisterRequest,
     db:      Session   = Depends(get_db),
     token:   TokenData = Depends(require_operator),
 ) -> Dict[str, Any]:
+    _check_rate_limit(request, max_calls=20, window_seconds=60)
     logger.info("register", message=f"Registration by '{token.username}' loc='{payload.location_id}'")
     try:
         img_bytes = base64.b64decode(payload.base64_image)
@@ -737,9 +756,11 @@ class PhotoSearchRequest(BaseModel):
 
 @app.post("/search/by-photo", tags=["Search"])
 def search_by_photo(
+    request: Request,
     payload: PhotoSearchRequest,
     db:      Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    _check_rate_limit(request, max_calls=15, window_seconds=60)
     import base64 as _b64
     from datetime import datetime, timezone, timedelta
     from recognition.face_recognizer import FaceRecognizer
@@ -832,6 +853,111 @@ def search_by_photo(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Object Sightings Routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/objects/recent", tags=["Objects"])
+def list_object_sightings(
+    limit: int = Query(50, ge=1, le=200),
+    object_type: Optional[str] = Query(None, description="Filter by type: backpack, car, etc."),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    from database.models import ObjectSighting
+    q = db.query(ObjectSighting).order_by(ObjectSighting.detected_at.desc())
+    if object_type:
+        q = q.filter(ObjectSighting.object_type == object_type)
+    rows = q.limit(limit).all()
+    return [
+        {
+            "id":          r.id,
+            "object_type": r.object_type,
+            "confidence":  round(r.confidence, 3),
+            "camera_id":   r.camera_id,
+            "location_id": r.location_id,
+            "zone_id":     r.zone_id,
+            "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+            "bbox":        {"x": r.bbox_x, "y": r.bbox_y, "w": r.bbox_w, "h": r.bbox_h}
+                           if r.bbox_x is not None else None,
+        }
+        for r in rows
+    ]
+
+
+@app.get("/objects/stats", tags=["Objects"])
+def object_stats(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    from database.models import ObjectSighting
+    from datetime import datetime, timezone
+    from sqlalchemy import func
+
+    today = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=None
+    )
+    try:
+        total = db.query(ObjectSighting).filter(ObjectSighting.detected_at >= today).count()
+        by_type = (
+            db.query(ObjectSighting.object_type, func.count(ObjectSighting.id))
+            .filter(ObjectSighting.detected_at >= today)
+            .group_by(ObjectSighting.object_type)
+            .all()
+        )
+    except Exception:
+        total = 0
+        by_type = []
+    return {
+        "total_today": total,
+        "by_type": {t: c for t, c in by_type},
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings / Config Routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+_app_config: Dict[str, Any] = {
+    "detection_confidence": 0.30,
+    "nms_iou_threshold": 0.45,
+    "face_match_threshold": 0.72,
+    "reid_match_threshold": 0.78,
+    "color_match_threshold": 30.0,
+    "sighting_cooldown_seconds": 30,
+    "max_simultaneous_streams": 4,
+    "yolo_input_size": 416,
+    "insightface_det_size": 160,
+}
+
+
+@app.get("/settings", tags=["Settings"])
+def get_settings(
+    token: TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    return {
+        "config": _app_config,
+        "active_streams": len(active_streams),
+        "max_streams": MAX_STREAMS,
+        "database_url_type": "postgresql" if not _is_sqlite() else "sqlite",
+    }
+
+
+@app.put("/settings", tags=["Settings"])
+def update_settings(
+    payload: Dict[str, Any],
+    token: TokenData = Depends(require_admin),
+) -> Dict[str, Any]:
+    updated = []
+    for key, value in payload.items():
+        if key in _app_config:
+            _app_config[key] = value
+            updated.append(key)
+    logger.info("settings.update", message=f"Updated: {updated}")
+    return {"updated": updated, "config": _app_config}
+
+
+def _is_sqlite() -> bool:
+    from database.db import DATABASE_URL
+    return DATABASE_URL.startswith("sqlite")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Analytics
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -847,3 +973,149 @@ def analytics_live_count(db: Session = Depends(get_db)) -> Dict[str, Any]:
     except Exception:
         count = 0
     return {"total": count}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Watchlist Routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WatchlistRequest(BaseModel):
+    unique_code: str = Field(..., description="Person SDT code to watch")
+    label:       Optional[str] = None
+    reason:      Optional[str] = None
+
+
+@app.get("/watchlist", tags=["Alerts"])
+def list_watchlist(
+    db:    Session   = Depends(get_db),
+    token: TokenData = Depends(require_operator),
+) -> List[Dict[str, Any]]:
+    from database.models import WatchlistEntry
+    entries = db.query(WatchlistEntry).order_by(WatchlistEntry.created_at.desc()).all()
+    return [
+        {
+            "id":          e.id,
+            "unique_code": e.unique_code,
+            "label":       e.label,
+            "reason":      e.reason,
+            "is_active":   e.is_active,
+            "created_at":  e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
+
+
+@app.post("/watchlist", tags=["Alerts"], status_code=status.HTTP_201_CREATED)
+def add_to_watchlist(
+    payload: WatchlistRequest,
+    db:      Session   = Depends(get_db),
+    token:   TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    from database.models import WatchlistEntry
+    person = db.query(Person).filter(Person.unique_code == payload.unique_code).first()
+    if not person:
+        raise HTTPException(status_code=404, detail=f"Person '{payload.unique_code}' not found.")
+
+    existing = db.query(WatchlistEntry).filter(
+        WatchlistEntry.unique_code == payload.unique_code,
+        WatchlistEntry.is_active == True,
+    ).first()
+    if existing:
+        return {"id": existing.id, "status": "already_watched", "unique_code": payload.unique_code}
+
+    from datetime import datetime
+    entry = WatchlistEntry(
+        unique_code=payload.unique_code,
+        label=payload.label or person.unique_code,
+        reason=payload.reason,
+        is_active=True,
+        created_at=datetime.utcnow(),
+    )
+    db.add(entry); db.commit(); db.refresh(entry)
+    logger.info("watchlist.add", message=f"Added {payload.unique_code} to watchlist")
+    return {"id": entry.id, "status": "added", "unique_code": payload.unique_code}
+
+
+@app.delete("/watchlist/{entry_id}", tags=["Alerts"])
+def remove_from_watchlist(
+    entry_id: str,
+    db:       Session   = Depends(get_db),
+    token:    TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    from database.models import WatchlistEntry
+    entry = db.query(WatchlistEntry).filter(WatchlistEntry.id == entry_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Watchlist entry not found.")
+    entry.is_active = False
+    db.commit()
+    logger.info("watchlist.remove", message=f"Deactivated watchlist entry {entry_id}")
+    return {"status": "removed", "id": entry_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alert Routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/alerts", tags=["Alerts"])
+def list_alerts(
+    limit:  int            = Query(50, ge=1, le=200),
+    unread: Optional[bool] = Query(None),
+    db:     Session        = Depends(get_db),
+    token:  TokenData      = Depends(require_operator),
+) -> List[Dict[str, Any]]:
+    from database.models import Alert
+    q = db.query(Alert).order_by(Alert.created_at.desc())
+    if unread is True:
+        q = q.filter(Alert.is_read == False)
+    rows = q.limit(limit).all()
+    return [
+        {
+            "id":          a.id,
+            "alert_type":  a.alert_type,
+            "severity":    a.severity,
+            "title":       a.title,
+            "message":     a.message,
+            "unique_code": a.unique_code,
+            "camera_id":   a.camera_id,
+            "location_id": a.location_id,
+            "is_read":     a.is_read,
+            "created_at":  a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in rows
+    ]
+
+
+@app.get("/alerts/unread-count", tags=["Alerts"])
+def alerts_unread_count(db: Session = Depends(get_db)) -> Dict[str, int]:
+    from database.models import Alert
+    try:
+        count = db.query(Alert).filter(Alert.is_read == False).count()
+    except Exception:
+        count = 0
+    return {"count": count}
+
+
+@app.put("/alerts/{alert_id}/read", tags=["Alerts"])
+def mark_alert_read(
+    alert_id: str,
+    db:       Session   = Depends(get_db),
+    token:    TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    from database.models import Alert
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found.")
+    alert.is_read = True
+    db.commit()
+    return {"status": "read", "id": alert_id}
+
+
+@app.put("/alerts/read-all", tags=["Alerts"])
+def mark_all_alerts_read(
+    db:    Session   = Depends(get_db),
+    token: TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    from database.models import Alert
+    count = db.query(Alert).filter(Alert.is_read == False).update({"is_read": True})
+    db.commit()
+    return {"status": "all_read", "count": count}

@@ -6,12 +6,17 @@ import Dashboard   from './pages/Dashboard.jsx'
 import PhotoSearch from './pages/PhotoSearch.jsx'
 import LiveCamera  from './pages/LiveCamera.jsx'
 import Locations   from './pages/Locations.jsx'
+import ObjectFeed  from './pages/ObjectFeed.jsx'
+import Alerts      from './pages/Alerts.jsx'
+import Settings    from './pages/Settings.jsx'
 
 const PAGE_TITLES = {
   '/':          'Dashboard',
   '/search':    'Photo Search',
   '/live':      'Live Camera',
   '/locations': 'Locations',
+  '/objects':   'Object Feed',
+  '/alerts':    'Alerts',
   '/settings':  'Settings',
 }
 
@@ -33,12 +38,9 @@ function AppShell() {
             <Route path="/search"    element={<PhotoSearch />} />
             <Route path="/live"      element={<LiveCamera />} />
             <Route path="/locations" element={<Locations />} />
-            <Route path="/settings"  element={
-              <div className="card fade-in" style={{ maxWidth: 480 }}>
-                <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 6 }}>Settings</div>
-                <div style={{ fontSize: 12, color: '#aaa' }}>Configuration coming soon.</div>
-              </div>
-            } />
+            <Route path="/objects"   element={<ObjectFeed />} />
+            <Route path="/alerts"    element={<Alerts />} />
+            <Route path="/settings"  element={<Settings />} />
             <Route path="*" element={
               <div className="card fade-in" style={{ maxWidth: 320 }}>
                 <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 6 }}>404 — Page not found</div>

@@ -247,14 +247,15 @@ export default function PhotoSearch() {
   const historyCount = result?.history_matches?.length || 0
 
   return (
-    /* FIX 6 — photosearch page uses grid with overflow constraints */
     <div className="fade-in" style={{
       display: 'grid',
-      gridTemplateColumns: '280px 1fr',
+      gridTemplateColumns: 'minmax(240px, 280px) 1fr',
       gap: 20,
       height: '100%',
       overflow: 'hidden',
     }}>
+    {/* Collapses to single-column below 600px via inline media query workaround */}
+    <style>{`@media (max-width: 600px) { .fade-in { grid-template-columns: 1fr !important; } }`}</style>
 
       {/* LEFT PANEL — scrollable */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, height: '100%', overflowY: 'auto' }}>
@@ -408,9 +409,8 @@ export default function PhotoSearch() {
           </div>
         )}
 
-        {/* Camera grid — FIX 6: auto-fill responsive */}
         {result ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
             {grid.map((cam, i) => <CameraCard key={i} cam={cam} />)}
           </div>
         ) : (

@@ -113,7 +113,7 @@ class ObjectSighting(Base):
     location_id = Column(String(64),  nullable=True, index=True)
     zone_id     = Column(String(64),  nullable=True)
     camera_id   = Column(String(64),  nullable=False)
-    object_type = Column(String(64),  nullable=False)                 # backpack / car / etc.
+    object_type = Column(String(64),  nullable=False)
     confidence  = Column(Float,       nullable=False)
     detected_at = Column(DateTime,    default=datetime.utcnow, nullable=False, index=True)
     bbox_x      = Column(Integer,     nullable=True)
@@ -123,3 +123,41 @@ class ObjectSighting(Base):
 
     def __repr__(self) -> str:
         return f"<ObjectSighting type={self.object_type!r} at={self.detected_at}>"
+
+
+# ─── Watchlist ───────────────────────────────────────────────────────────────
+
+class WatchlistEntry(Base):
+    """A person on the watchlist — triggers alerts when detected."""
+    __tablename__ = "watchlist"
+
+    id          = Column(String(36),  primary_key=True, default=_uuid)
+    unique_code = Column(String(32),  nullable=False, index=True)
+    label       = Column(String(128), nullable=True)
+    reason      = Column(Text,        nullable=True)
+    is_active   = Column(Boolean,     nullable=False, default=True)
+    created_at  = Column(DateTime,    default=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<WatchlistEntry code={self.unique_code!r} active={self.is_active}>"
+
+
+# ─── Alert ───────────────────────────────────────────────────────────────────
+
+class Alert(Base):
+    """Triggered when a watchlisted person is detected or a system event occurs."""
+    __tablename__ = "alerts"
+
+    id          = Column(String(36),  primary_key=True, default=_uuid)
+    alert_type  = Column(String(32),  nullable=False, index=True)    # watchlist | camera_offline | crowd
+    severity    = Column(String(16),  nullable=False, default="info")  # info | warning | critical
+    title       = Column(String(256), nullable=False)
+    message     = Column(Text,        nullable=True)
+    unique_code = Column(String(32),  nullable=True, index=True)
+    camera_id   = Column(String(64),  nullable=True)
+    location_id = Column(String(64),  nullable=True)
+    is_read     = Column(Boolean,     nullable=False, default=False)
+    created_at  = Column(DateTime,    default=datetime.utcnow, nullable=False, index=True)
+
+    def __repr__(self) -> str:
+        return f"<Alert type={self.alert_type!r} severity={self.severity!r} at={self.created_at}>"

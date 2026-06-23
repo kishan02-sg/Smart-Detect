@@ -2,7 +2,7 @@
 database/queries.py
 ────────────────────
 Core database query functions for SmartDetect.
-Cosine similarity computed in Python (SQLite-compatible, no pgvector needed).
+Uses pgvector for PostgreSQL, Python cosine similarity for SQLite.
 """
 
 from __future__ import annotations
@@ -15,11 +15,16 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from database.models import Location, Person, Sighting
+from database.models import Location, Person, Sighting, WatchlistEntry, Alert
 from backend.logger import get_structured_logger
 
 logger = get_structured_logger(__name__)
+
+
+def _is_postgres(db: Session) -> bool:
+    return db.bind.dialect.name == "postgresql"
 
 
 # ─── Helper ───────────────────────────────────────────────────────────────────
@@ -42,12 +47,52 @@ def find_person_by_embedding(
     embedding_field: str = "face_embedding",
 ) -> Optional[Dict[str, Any]]:
     """
-    Search persons table for closest embedding using Python cosine similarity.
-    embedding_field selects which column to compare ("face_embedding" or "reid_embedding").
-    Returns dict with unique_code and similarity, or None.
+    Search persons table for closest embedding match.
+    Uses pgvector cosine distance on PostgreSQL, Python cosine similarity on SQLite.
     """
     logger.debug("query.match_start", message=f"Searching {embedding_field} with threshold={threshold}")
 
+    if _is_postgres(db):
+        return _find_person_pgvector(embedding, db, threshold, embedding_field)
+    return _find_person_python(embedding, db, threshold, embedding_field)
+
+
+def _find_person_pgvector(
+    embedding: np.ndarray,
+    db: Session,
+    threshold: float,
+    embedding_field: str,
+) -> Optional[Dict[str, Any]]:
+    """pgvector cosine distance search — runs entirely in the database."""
+    col = "reid_embedding" if embedding_field == "reid_embedding" else "face_embedding"
+    vec_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+
+    row = db.execute(
+        text(f"""
+            SELECT unique_code,
+                   1 - ({col}::vector <=> :vec::vector) AS similarity
+            FROM persons
+            WHERE {col} IS NOT NULL
+            ORDER BY {col}::vector <=> :vec::vector
+            LIMIT 1
+        """),
+        {"vec": vec_str},
+    ).fetchone()
+
+    if row is None or row.similarity < threshold:
+        return None
+
+    logger.info("query.match_found", message=f"pgvector match: code={row.unique_code} sim={row.similarity:.3f}")
+    return {"unique_code": row.unique_code, "similarity": round(float(row.similarity), 4)}
+
+
+def _find_person_python(
+    embedding: np.ndarray,
+    db: Session,
+    threshold: float,
+    embedding_field: str,
+) -> Optional[Dict[str, Any]]:
+    """Python-side cosine similarity scan — works on SQLite."""
     if embedding_field == "reid_embedding":
         persons = db.query(Person).filter(Person.reid_embedding.isnot(None)).all()
         def get_stored(p): return p.reid_embedding
@@ -246,3 +291,48 @@ def get_recent_detections(limit: int = 20, db: Session = None) -> List[Dict[str,
             "camera_id":   sighting.camera_id,
         })
     return result
+
+
+# ─── Query 8 — Watchlist Alert Check ─────────────────────────────────────────
+
+_watchlist_alert_cache: Dict[str, float] = {}
+
+def check_watchlist_alert(
+    unique_code: str,
+    camera_id: str,
+    location_id: str,
+    db: Session,
+) -> None:
+    """Create an alert if this person is on the active watchlist. Deduped per 5 minutes."""
+    now = datetime.now(timezone.utc).timestamp()
+    cache_key = f"{unique_code}:{camera_id}"
+    if now - _watchlist_alert_cache.get(cache_key, 0) < 300:
+        return
+
+    entry = db.query(WatchlistEntry).filter(
+        WatchlistEntry.unique_code == unique_code,
+        WatchlistEntry.is_active == True,
+    ).first()
+    if not entry:
+        return
+
+    _watchlist_alert_cache[cache_key] = now
+    alert = Alert(
+        alert_type="watchlist",
+        severity="critical",
+        title=f"Watchlisted person {unique_code} detected",
+        message=f"Detected on camera {camera_id} at location {location_id}."
+                + (f" Reason: {entry.reason}" if entry.reason else ""),
+        unique_code=unique_code,
+        camera_id=camera_id,
+        location_id=location_id,
+        is_read=False,
+        created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    try:
+        db.add(alert)
+        db.commit()
+        logger.info("alert.watchlist", message=f"Alert created for {unique_code} on {camera_id}")
+    except Exception as exc:
+        db.rollback()
+        logger.error("alert.watchlist_error", message=str(exc))
