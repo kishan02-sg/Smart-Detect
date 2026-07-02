@@ -607,7 +607,7 @@ class CameraProcessor:
         try:
             resp = requests.post(
                 f"{self.api_base_url}/auth/login",
-                json={"username": "operator", "password": "metroOp2024"},
+                json={"username": "operator", "password": "smartOp2024"},
                 timeout=5,
             )
             logger.debug("camera.auth_response",

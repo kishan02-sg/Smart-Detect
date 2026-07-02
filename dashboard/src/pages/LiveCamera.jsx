@@ -338,7 +338,7 @@ export default function LiveCamera() {
     const cached = sessionStorage.getItem('sd_token')
     if (cached) { setToken(cached); return }
     // Auto-login with default operator credentials
-    axios.post(`${API}/auth/login`, { username: 'operator', password: 'metroOp2024' })
+    axios.post(`${API}/auth/login`, { username: 'operator', password: 'smartOp2024' })
       .then(r => { sessionStorage.setItem('sd_token', r.data.access_token); setToken(r.data.access_token) })
       .catch(() => setError('Backend unreachable. Start: uvicorn backend.main:app --port 8000'))
   }, [])

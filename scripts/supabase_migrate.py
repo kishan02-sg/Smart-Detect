@@ -67,7 +67,7 @@ def migrate_data():
 
     # Source: local SQLite
     project_root = Path(__file__).resolve().parent.parent
-    sqlite_url = f"sqlite:///{project_root / 'metro.db'}"
+    sqlite_url = f"sqlite:///{project_root / 'smartdetect.db'}"
     sqlite_engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
     SqliteSession = sessionmaker(bind=sqlite_engine)
 

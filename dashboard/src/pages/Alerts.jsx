@@ -34,7 +34,7 @@ async function ensureToken() {
   let token = getToken()
   if (token) return token
   try {
-    const res = await axios.post(`${API}/auth/login`, { username: 'operator', password: 'metroOp2024' })
+    const res = await axios.post(`${API}/auth/login`, { username: 'operator', password: 'smartOp2024' })
     token = res.data.access_token
     localStorage.setItem('smartdetect_token', token)
     return token

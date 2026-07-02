@@ -35,7 +35,7 @@ export default function Locations() {
     } finally { setSaving(false) }
   }
 
-  const TYPE_COLORS = { station: '#eff6ff', entrance: '#f0fdf4', exit: '#fef2f2', other: '#f9fafb' }
+  const TYPE_COLORS = { entrance: '#f0fdf4', exit: '#fef2f2', lobby: '#eff6ff', corridor: '#fefce8', parking: '#f5f3ff', office: '#ecfdf5', warehouse: '#fff7ed', outdoor: '#f0f9ff', other: '#f9fafb' }
 
   return (
     <div className="fade-in">
@@ -43,7 +43,7 @@ export default function Locations() {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <div style={{ fontSize: 13, fontWeight: 500 }}>{locations.length} locations registered</div>
-          <div style={{ fontSize: 11, color: '#aaa', marginTop: 1 }}>Stations, entrances, exits and zones</div>
+          <div style={{ fontSize: 11, color: '#aaa', marginTop: 1 }}>Entrances, exits, lobbies, corridors, and zones</div>
         </div>
         <button className="btn btn-black" onClick={() => setShowForm(!showForm)}>
           {showForm ? 'Cancel' : '+ Add Location'}
@@ -68,7 +68,7 @@ export default function Locations() {
             <div>
               <label style={{ fontSize: 11, color: '#aaa', display: 'block', marginBottom: 4 }}>Type</label>
               <select value={form.type} onChange={e => setForm(p => ({ ...p, type: e.target.value }))}>
-                {['station', 'entrance', 'exit', 'other'].map(t => <option key={t} value={t}>{t}</option>)}
+                {['entrance', 'exit', 'lobby', 'corridor', 'parking', 'office', 'warehouse', 'outdoor', 'other'].map(t => <option key={t} value={t}>{t}</option>)}
               </select>
             </div>
             <div>

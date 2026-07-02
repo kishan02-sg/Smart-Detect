@@ -1,7 +1,7 @@
 """
 scripts/seed_stations.py
 ─────────────────────────
-Seed metro stations into the database via the FastAPI /stations endpoint.
+Seed demo locations into the database via the FastAPI /stations endpoint.
 Run once after starting the backend:
     python scripts/seed_stations.py
 """
@@ -14,14 +14,14 @@ import urllib.request
 API_BASE = "http://localhost:8000"
 
 STATIONS = [
-    {"id": "STA-001", "name": "Central Station",   "location": "City Centre, Line 1 & 2"},
-    {"id": "STA-002", "name": "Airport Terminal",  "location": "International Airport, Line 3"},
-    {"id": "STA-003", "name": "North Junction",    "location": "North District, Line 1"},
-    {"id": "STA-004", "name": "South Gate",        "location": "South District, Line 2"},
-    {"id": "STA-005", "name": "East Plaza",        "location": "East Commercial Zone, Line 2"},
-    {"id": "STA-006", "name": "West Terminal",     "location": "West Residential, Line 1"},
-    {"id": "STA-007", "name": "University Stop",   "location": "University District, Line 3"},
-    {"id": "STA-008", "name": "Market Square",     "location": "Old Town Market, Line 1 & 3"},
+    {"id": "STA-001", "name": "Main Lobby",         "location": "Building A, Ground Floor"},
+    {"id": "STA-002", "name": "Parking Entrance",   "location": "Building A, Basement Level"},
+    {"id": "STA-003", "name": "North Wing",         "location": "Building B, Floor 1"},
+    {"id": "STA-004", "name": "South Gate",          "location": "Perimeter, South Side"},
+    {"id": "STA-005", "name": "East Plaza",          "location": "Outdoor Area, East Side"},
+    {"id": "STA-006", "name": "West Corridor",       "location": "Building A, Floor 2"},
+    {"id": "STA-007", "name": "Loading Dock",        "location": "Building C, Rear"},
+    {"id": "STA-008", "name": "Reception",           "location": "Building A, Front Desk"},
 ]
 
 

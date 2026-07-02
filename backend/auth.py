@@ -1,7 +1,7 @@
 """
 backend/auth.py
 ────────────────
-JWT authentication for the Metro Person Tracking System.
+JWT authentication for the SmartDetect Person Tracking System.
 
 Provides:
   - POST /auth/login  — returns a signed JWT for valid credentials
@@ -13,8 +13,8 @@ Roles:
   admin     — full access including user management, log viewing
 
 Default credentials (override via .env):
-  admin    / metroAdmin2024
-  operator / metroOp2024
+  admin    / smartAdmin2024
+  operator / smartOp2024
 
 TOKEN LIFETIME: 8 hours (configurable via JWT_EXPIRE_HOURS env var)
 """
@@ -39,7 +39,7 @@ except ImportError:
 from pydantic import BaseModel
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
-SECRET_KEY   = os.getenv("JWT_SECRET",       "metro-super-secret-key-change-in-prod")
+SECRET_KEY   = os.getenv("JWT_SECRET",       "smartdetect-secret-key-change-in-prod")
 ALGORITHM    = "HS256"
 EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "8"))
 
@@ -47,11 +47,11 @@ EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "8"))
 # Production NOTE: replace this dict with a real users table.
 _USERS = {
     os.getenv("ADMIN_USERNAME",    "admin"):    {
-        "password": os.getenv("ADMIN_PASSWORD",    "metroAdmin2024"),
+        "password": os.getenv("ADMIN_PASSWORD",    "smartAdmin2024"),
         "role":     "admin",
     },
     os.getenv("OPERATOR_USERNAME", "operator"): {
-        "password": os.getenv("OPERATOR_PASSWORD", "metroOp2024"),
+        "password": os.getenv("OPERATOR_PASSWORD", "smartOp2024"),
         "role":     "operator",
     },
 }

@@ -4,7 +4,7 @@ database/db.py
 SQLAlchemy engine setup — supports both SQLite (local dev) and PostgreSQL (Supabase).
 
 Set DATABASE_URL env var to switch:
-  - SQLite (default):  sqlite:///./metro.db
+  - SQLite (default):  sqlite:///./smartdetect.db
   - Supabase:          postgresql://postgres.[ref]:[pass]@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
 """
 
@@ -22,7 +22,7 @@ load_dotenv()
 _project_root = Path(__file__).resolve().parent.parent
 DATABASE_URL: str = os.getenv(
     "DATABASE_URL",
-    f"sqlite:///{_project_root / 'metro.db'}",
+    f"sqlite:///{_project_root / 'smartdetect.db'}",
 )
 
 _is_sqlite = DATABASE_URL.startswith("sqlite")

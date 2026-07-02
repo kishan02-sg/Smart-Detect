@@ -39,7 +39,7 @@ services:
       # init.sql is auto-executed ONCE on first container start:
       #   - enables pgvector extension
       #   - creates tables (persons, stations, sightings)
-      #   - seeds 8 metro stations
+      #   - seeds 8 demo locations
       - ./docker/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U metro_user -d metro_db"]
@@ -59,11 +59,11 @@ services:
       DATABASE_URL:      postgresql://metro_user:metro_pass@postgres:5432/metro_db
       MODEL_CACHE_DIR:   /app/.insightface
       # JWT settings (override in production .env)
-      JWT_SECRET:        metro-docker-secret-change-in-prod
+      JWT_SECRET:        smartdetect-docker-secret-change-in-prod
       JWT_EXPIRE_HOURS:  "8"
       # Default operator credentials (override in production)
-      ADMIN_PASSWORD:    metroAdmin2024
-      OPERATOR_PASSWORD: metroOp2024
+      ADMIN_PASSWORD:    smartAdmin2024
+      OPERATOR_PASSWORD: smartOp2024
     ports:
       - "8000:8000"
     volumes:

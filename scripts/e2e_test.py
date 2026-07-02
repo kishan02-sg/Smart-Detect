@@ -105,7 +105,7 @@ check("Backend reachable", status == 200, f"HTTP {status}: {body}")
 # ── Step 1: Login and get token ───────────────────────────────
 print(f"\n{CYAN}Step 1 — Login & Get JWT Token{RESET}")
 status, body = http("POST", "/auth/login",
-    {"username": "operator", "password": "metroOp2024"})
+    {"username": "operator", "password": "smartOp2024"})
 token = body.get("access_token", "")
 check("Login successful", status == 200 and token != "",
     f"HTTP {status}: {body}")

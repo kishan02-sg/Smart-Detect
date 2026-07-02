@@ -1,7 +1,7 @@
 """
 backend/logger.py
 ──────────────────
-Structured logging for the Metro Person Tracking System.
+Structured logging for the SmartDetect Person Tracking System.
 
 Features:
   - Writes to /logs/system.log with rotating file handler (max 10 MB × 5 backups)

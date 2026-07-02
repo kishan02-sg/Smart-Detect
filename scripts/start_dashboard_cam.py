@@ -4,7 +4,7 @@ import requests
 API = "http://localhost:8000"
 
 # 1. Login
-r = requests.post(f"{API}/auth/login", json={"username": "operator", "password": "metroOp2024"})
+r = requests.post(f"{API}/auth/login", json={"username": "operator", "password": "smartOp2024"})
 token = r.json()["access_token"]
 h = {"Authorization": f"Bearer {token}"}
 print("Token: OK")
@@ -16,7 +16,7 @@ print(f"Locations: {loc_ids}")
 
 # 3. Create location if needed
 if "LOC-001" not in loc_ids:
-    r = requests.post(f"{API}/locations", json={"id": "LOC-001", "name": "Metro Entrance", "type": "metro_station"}, headers=h)
+    r = requests.post(f"{API}/locations", json={"id": "LOC-001", "name": "Main Entrance", "type": "entrance"}, headers=h)
     print(f"Created location: {r.status_code}")
 
 # 4. Check cameras

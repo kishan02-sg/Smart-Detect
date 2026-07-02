@@ -1,7 +1,7 @@
 """
 tracker/deepsort_tracker.py
 ────────────────────────────
-DeepSORT multi-object tracker wrapper for the Metro Person Tracking System.
+DeepSORT multi-object tracker wrapper for the SmartDetect Person Tracking System.
 Provides stable track IDs across frames for consistent identity assignment.
 """
 

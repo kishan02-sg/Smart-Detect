@@ -1,7 +1,7 @@
 """
 scripts/accuracy_test.py
 ──────────────────────────
-Accuracy evaluation for the Metro Person Tracking System.
+Accuracy evaluation for the SmartDetect Person Tracking System.
 
 Runs 100 synthetic test images through the full recognition pipeline and outputs:
   - Correct matches  (true positives)
@@ -109,7 +109,7 @@ def run_accuracy_test(
     threshold         : cosine-similarity threshold for a positive match
     """
 
-    print(f"\n{BOLD}{CYAN}Metro Person Tracking — Accuracy Test{RESET}")
+    print(f"\n{BOLD}{CYAN}SmartDetect Person Tracking — Accuracy Test{RESET}")
     print(f"{'─'*56}")
     print(f"  Enrolled persons   : {num_persons}")
     print(f"  Total probe images : {total_images}")
@@ -251,7 +251,7 @@ def _try_load_face_recognizer():
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Metro Tracking — Accuracy Test")
+    parser = argparse.ArgumentParser(description="SmartDetect — Accuracy Test")
     parser.add_argument("--images",   type=int,   default=100,  help="Total probe images (default 100)")
     parser.add_argument("--persons",  type=int,   default=10,   help="Enrolled persons (default 10)")
     parser.add_argument("--noise",    type=float, default=0.15, help="Probe noise 0.0–1.0 (default 0.15)")

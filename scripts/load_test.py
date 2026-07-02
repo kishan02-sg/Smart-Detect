@@ -1,7 +1,7 @@
 """
 scripts/load_test.py
 ─────────────────────
-Locust load test for the Metro Person Tracking System.
+Locust load test for the SmartDetect Person Tracking System.
 
 Simulates 50 concurrent operators hitting the API and reports response times.
 Target: GET /person/{code}/trail average response time < 300 ms.
@@ -120,9 +120,9 @@ if _LOCUST_AVAILABLE:
             """
             self.client.get("/stations", name="/stations")
 
-    class MetroOperator(HttpUser):
+    class SmartDetectOperator(HttpUser):
         """
-        Represents a single metro control-room operator.
+        Represents a single control-room operator.
         Think-time between requests: 1–3 seconds (realistic operator pacing).
         """
         tasks = [TrailTasks]
@@ -235,7 +235,7 @@ def _run_standalone(host: str, users: int, duration_sec: int) -> None:
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Metro Load Test")
+    parser = argparse.ArgumentParser(description="SmartDetect Load Test")
     parser.add_argument("--host",       default="http://localhost:8000")
     parser.add_argument("--users",      type=int, default=50,  help="Concurrent users")
     parser.add_argument("--spawn-rate", type=int, default=5,   help="Users spawned per second")

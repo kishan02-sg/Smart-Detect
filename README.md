@@ -1,8 +1,8 @@
-# Metro Person Tracking System
+# SmartDetect — Person Tracking System
 
 <div align="center">
 
-**AI-powered real-time person tracking and re-identification for metro networks**
+**AI-powered real-time person tracking and re-identification for any camera-equipped environment**
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev)
@@ -14,7 +14,7 @@
 
 ## Overview
 
-The **Metro Person Tracking System** is a production-grade AI surveillance platform designed for metropolitan transit networks. It uses deep learning to automatically detect, register, and track individuals across multiple camera feeds in real time — assigning each person a unique tracking code and building a chronological movement trail as they travel through the network.
+**SmartDetect** is a production-grade AI surveillance platform that works in any camera-equipped environment — offices, campuses, warehouses, retail stores, transit hubs, parking structures, and more. It uses deep learning to automatically detect, register, and track individuals across multiple camera feeds in real time — assigning each person a unique tracking code and building a chronological movement trail as they move through monitored zones.
 
 The system combines **InsightFace** ArcFace embeddings for face recognition with **OSNet** person re-identification as a fallback when faces are obscured, and uses **DeepSORT** for stable multi-object tracking across video frames. A **FastAPI** backend stores all data in PostgreSQL with `pgvector` for fast similarity search, while a **React** dashboard gives operators an intuitive interface to search persons and view movement trails in real time.
 
@@ -31,7 +31,7 @@ The system combines **InsightFace** ArcFace embeddings for face recognition with
 ┌─────────────────────▼───────────────────────────────────┐
 │                   FastAPI Backend                        │
 │  /auth/login  /register  /sighting  /person/trail        │
-│  /stations    /logs      /health                         │
+│  /locations   /logs      /health                         │
 └──────┬──────────────┬────────────────────┬──────────────┘
        │              │                    │
 ┌──────▼──────┐ ┌─────▼──────┐  ┌─────────▼────────────┐
@@ -63,8 +63,8 @@ The system combines **InsightFace** ArcFace embeddings for face recognition with
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-org/metro-tracking.git
-cd metro-tracking
+git clone https://github.com/your-org/smartdetect.git
+cd smartdetect
 
 # 2. Start all services (Postgres + Backend + Frontend)
 docker compose up
@@ -80,7 +80,7 @@ docker compose exec backend python scripts/demo_setup.py --days 3
 On first start, `docker/init.sql` automatically:
 - Enables the `pgvector` extension
 - Creates all tables
-- Seeds 8 metro stations
+- Seeds 8 demo locations
 
 ---
 
@@ -121,8 +121,8 @@ npm run dev
 ### Seed demo data
 
 ```bash
-# Seed 8 stations
-python scripts/seed_db.py
+# Seed 8 locations
+python scripts/seed_stations.py
 
 # Seed 10 demo persons with 3 days of movement history
 python scripts/demo_setup.py --days 3
@@ -135,15 +135,15 @@ python scripts/demo_setup.py --days 3
 After starting the system (Docker or local):
 
 1. Open **http://localhost:5173**
-2. Click **"Register Person"** → upload a face photo → select entry station
-3. Copy the assigned `MET-YYYYMMDD-XXXX` code
+2. Click **"Register Person"** → upload a face photo → select entry location
+3. Copy the assigned `SDT-XXXX` code
 4. Click **"Person Trail"** → paste the code → view the movement timeline
 
 To see a pre-populated dashboard with realistic data:
 ```bash
 python scripts/demo_setup.py --days 3
 ```
-Then search for any code like `MET-<today>-D000` through `MET-<today>-D009`.
+Then search for any code like `SDT-0001` through `SDT-0010`.
 
 ---
 
@@ -159,10 +159,10 @@ All protected routes require a **JWT Bearer token**.
 # Get a token
 curl -X POST http://localhost:8000/auth/login \
      -H "Content-Type: application/json" \
-     -d '{"username": "operator", "password": "metroOp2024"}'
+     -d '{"username": "operator", "password": "smartOp2024"}'
 
 # Use the token
-curl http://localhost:8000/stations \
+curl http://localhost:8000/locations \
      -H "Authorization: Bearer <token>"
 ```
 
@@ -170,8 +170,8 @@ curl http://localhost:8000/stations \
 
 | Username | Password | Role |
 |---|---|---|
-| `admin` | `metroAdmin2024` | Full access |
-| `operator` | `metroOp2024` | Search & view |
+| `admin` | `smartAdmin2024` | Full access |
+| `operator` | `smartOp2024` | Search & view |
 
 ### Endpoints
 
@@ -182,8 +182,11 @@ curl http://localhost:8000/stations \
 | `POST` | `/register` | operator+ | Register person from base64 image |
 | `GET` | `/person/{code}/trail` | operator+ | Get movement trail |
 | `POST` | `/sighting` | operator+ | Log a camera sighting |
-| `GET` | `/stations` | operator+ | List all stations |
-| `POST` | `/stations` | admin | Create a new station |
+| `GET` | `/locations` | operator+ | List all locations |
+| `POST` | `/locations` | admin | Create a new location |
+| `GET` | `/watchlist` | operator+ | View watchlist entries |
+| `GET` | `/alerts` | operator+ | View alerts |
+| `GET` | `/settings` | operator+ | View system settings |
 | `GET` | `/logs?lines=100` | admin | Fetch recent system logs |
 
 ---
@@ -193,6 +196,9 @@ curl http://localhost:8000/stations \
 ```bash
 # End-to-end integration test
 python scripts/e2e_test.py
+
+# New features test suite (rate limiting, settings, watchlist, alerts)
+python scripts/test_new_features.py
 
 # Load test (50 concurrent users, 60 seconds)
 python scripts/load_test.py --standalone --users 50 --duration 60s
@@ -224,7 +230,7 @@ python scripts/accuracy_test.py --images 100 --persons 10
 ## Project Structure
 
 ```
-metro-tracking/
+smartdetect/
 ├── backend/          # FastAPI app, auth, logger
 ├── cameras/          # CameraProcessor with auto-reconnect
 ├── database/         # SQLAlchemy models, queries, db setup
@@ -233,7 +239,7 @@ metro-tracking/
 ├── models/           # Model cache directory
 ├── recognition/      # FaceRecognizer, PersonReID, registration
 ├── scripts/          # e2e_test, load_test, accuracy_test,
-│                     # demo_setup, seed_db, run_camera
+│                     # demo_setup, seed_stations, test_new_features
 ├── tracker/          # DeepSORT wrapper
 ├── logs/             # Rotating system.log (auto-created)
 ├── docker-compose.yml
@@ -243,6 +249,20 @@ metro-tracking/
 
 ---
 
+## Use Cases
+
+SmartDetect can be deployed in any environment with camera coverage:
+
+- **Office buildings** — visitor tracking, access monitoring
+- **Retail stores** — customer flow analysis, loss prevention
+- **Campuses** — student and staff movement tracking
+- **Warehouses** — worker safety, zone compliance
+- **Transit hubs** — commuter flow, crowd management
+- **Parking structures** — vehicle + person tracking
+- **Event venues** — attendee monitoring, security alerts
+
+---
+
 ## License
 
-MIT © 2026 Metro Tracking Team
+MIT © 2026 SmartDetect Team
