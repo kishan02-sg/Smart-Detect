@@ -239,7 +239,7 @@ class CameraCreateRequest(BaseModel):
 
 @app.post("/auth/login", response_model=LoginResponse, tags=["Auth"])
 def login(request: Request, payload: LoginRequest) -> LoginResponse:
-    _check_rate_limit(request, max_calls=10, window_seconds=60)
+    _check_rate_limit(request, max_calls=20, window_seconds=60)
     result = _auth_login(payload)
     logger.info("auth.login", message=f"Login by user='{payload.username}' role='{result.role}'")
     return result
@@ -722,7 +722,7 @@ def camera_stream(camera_id: str) -> StreamingResponse:
                 + frame_bytes
                 + b"\r\n"
             )
-            time.sleep(0.1)
+            time.sleep(0.03)  # ~30 FPS browser stream (was 0.1 = 10 FPS cap)
 
     return StreamingResponse(
         generate(),

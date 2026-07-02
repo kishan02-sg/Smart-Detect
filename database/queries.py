@@ -129,13 +129,25 @@ def find_by_dress_color(
     hsv: Dict,
     threshold: float = 30.0,
     db: Session = None,
+    recent_minutes: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Search for a person whose stored dress_color_hsv is within `threshold`
     HSV distance of the given colour dict {hue, saturation, value}.
+
+    Clothing colour cannot distinguish strangers — pass `recent_minutes` to
+    restrict candidates to persons seen within that window, so colour only
+    re-associates someone who just walked out of face view, never claims a
+    long-gone identity for a new person.
+
     Returns {unique_code, score} or None.
     """
-    persons = db.query(Person).filter(Person.dress_color_hsv.isnot(None)).all()
+    q = db.query(Person).filter(Person.dress_color_hsv.isnot(None))
+    if recent_minutes is not None:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=recent_minutes)
+        q = q.filter(Person.last_seen_at.isnot(None), Person.last_seen_at >= cutoff)
+    persons = q.all()
     best_code = None
     best_dist = float("inf")
 

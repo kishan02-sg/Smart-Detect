@@ -96,6 +96,32 @@ def _hsv_distance(a: Dict, b: Dict) -> float:
     return float(np.sqrt(dh**2 + ds**2 + dv**2))
 
 
+def _face_veto(query_emb: Optional[np.ndarray], unique_code: str, db, threshold: float) -> bool:
+    """
+    Return True if the colour/Re-ID match to `unique_code` should be REJECTED:
+    we have a face for the query AND the candidate has a stored face AND they
+    clearly differ. Without this, colour matching hands one person's SDT code
+    to a different person whose face is plainly visible.
+    """
+    if query_emb is None:
+        return False
+    try:
+        person = db.query(Person).filter(Person.unique_code == unique_code).first()
+        if person is None or not person.face_embedding:
+            return False
+        stored = np.array(json.loads(person.face_embedding), dtype=np.float32)
+        na, nb = np.linalg.norm(query_emb), np.linalg.norm(stored)
+        if na == 0 or nb == 0:
+            return False
+        sim = float(np.dot(query_emb, stored) / (na * nb))
+        if sim < threshold:
+            logger.debug("face veto: %s rejected (face sim %.3f < %.2f)", unique_code, sim, threshold)
+            return True
+    except Exception as exc:
+        logger.debug("face veto check failed: %s", exc)
+    return False
+
+
 # ─── SmartIdentifier ──────────────────────────────────────────────────────────
 
 class SmartIdentifier:
@@ -108,10 +134,15 @@ class SmartIdentifier:
         # result: {unique_code, method, confidence, color_hex, ...}
     """
 
-    FACE_THRESHOLD  = 0.35
+    FACE_THRESHOLD  = 0.50   # ArcFace cosine sim — 0.35 cross-matched strangers
     COLOR_THRESHOLD = 30.0
     REID_THRESHOLD  = 0.55
     MULTI_THRESHOLD = 0.65
+    # Colour/Re-ID may only re-associate someone seen this recently (minutes)
+    COLOR_RECENT_MINUTES = 10.0
+    # If the query face clearly differs from a candidate's stored face,
+    # reject colour/Re-ID matches to that candidate (face veto)
+    FACE_VETO_THRESHOLD = 0.30
 
     def identify(
         self,
@@ -120,10 +151,31 @@ class SmartIdentifier:
         db,
         location_id: str = "",
         zone_id: str = "",
+        allow_new: bool = True,
+        face_embedding: Optional[np.ndarray] = None,
+        exclude_codes: Optional[set] = None,
     ) -> Dict:
-        """Run the full 4-method pipeline and return result dict."""
+        """
+        Run the full 4-method pipeline and return result dict.
+
+        allow_new=False skips new-person registration when no method matches
+        and returns {"unique_code": "Detecting...", "method": "pending"} —
+        callers gate registration on track age to avoid one ghost SDT row
+        per analysis cycle.
+
+        face_embedding: pre-computed ArcFace embedding for THE face matched to
+        this person box (e.g. from the caller's full-frame scan). Passing it
+        skips a per-person InsightFace run and guarantees identity comes from
+        the right face when boxes overlap.
+
+        exclude_codes: SDT codes already claimed by other people visible right
+        now — colour/Re-ID may not hand these to a second person. New
+        registration requires a face; a box with no visible face stays
+        "Detecting..." (clothing colour alone must never mint an identity).
+        """
         import cv2
 
+        exclude_codes = exclude_codes or set()
         x, y, w, h = bbox
         fh, fw = frame.shape[:2]
         person_crop = frame[
@@ -135,39 +187,45 @@ class SmartIdentifier:
             max(0, x): min(fw, x + w),
         ]
 
-        # Partial scores for multi-feature fallback
-        best_face_code,  face_score  = None, 0.0
-        best_reid_code,  reid_score  = None, 0.0
-        best_color_code, color_score = None, 0.0
-        color_info: Optional[Dict]   = None
+        color_info: Optional[Dict] = None
+        reid_emb                   = None
+        query_face_emb: Optional[np.ndarray] = None
 
-        # ── Method 1: Face ──────────────────────────────────────────────────
+        # ── Method 1: Face ───────────────────────────────────────────────────
         try:
-            recognizer = _get_face_recognizer()
-            embeddings = recognizer.extract_embedding(frame)
-            if embeddings:
-                q_emb = embeddings[0]
-                match = find_person_by_embedding(q_emb, db=db, threshold=self.FACE_THRESHOLD)
+            if face_embedding is not None:
+                query_face_emb = np.asarray(face_embedding, dtype=np.float32)
+            elif person_crop.size > 0:
+                recognizer = _get_face_recognizer()
+                embs = recognizer.extract_embedding(person_crop) or []
+                if embs:
+                    query_face_emb = embs[0]
+            if query_face_emb is not None:
+                match = find_person_by_embedding(query_face_emb, db=db, threshold=self.FACE_THRESHOLD)
                 if match:
                     return {
                         "unique_code": match["unique_code"],
                         "method":      "face",
                         "confidence":  round(match["similarity"], 3),
                         "color_hex":   None,
-                        "embedding":   q_emb.tolist(),
+                        "embedding":   query_face_emb.tolist(),
                     }
-                if len(embeddings) > 0:
-                    best_face_code = None
-                    face_score = 0.0  # no match but have embedding
         except Exception as exc:
             logger.debug("SmartIdentifier.face failed: %s", exc)
 
-        # ── Method 2: Dress Color ────────────────────────────────────────────
+        # ── Method 2: Dress Color (recent persons only + face veto) ─────────
         try:
             color_info = _dominant_color_hsv(torso_crop)
             if color_info:
-                color_match = find_by_dress_color(color_info, threshold=self.COLOR_THRESHOLD, db=db)
-                if color_match:
+                color_match = find_by_dress_color(
+                    color_info, threshold=self.COLOR_THRESHOLD, db=db,
+                    recent_minutes=self.COLOR_RECENT_MINUTES,
+                )
+                if (color_match
+                        and color_match["unique_code"] not in exclude_codes
+                        and not _face_veto(
+                            query_face_emb, color_match["unique_code"], db, self.FACE_VETO_THRESHOLD
+                        )):
                     return {
                         "unique_code": color_match["unique_code"],
                         "method":      "dress_color",
@@ -175,22 +233,25 @@ class SmartIdentifier:
                         "color_hex":   color_info["hex_color"],
                         "embedding":   None,
                     }
-                best_color_code = None
-                color_score = 0.0
         except Exception as exc:
             logger.debug("SmartIdentifier.dress_color failed: %s", exc)
 
-        # ── Method 3: Body Re-ID ─────────────────────────────────────────────
+        # ── Method 3: Body Re-ID (skipped in stub mode — histogram ≠ identity)
         try:
             reid = _get_reid_model()
             reid_emb = reid.extract_features(person_crop)
-            if reid_emb is not None and len(reid_emb) > 0:
+            if (not getattr(reid, "is_stub", False)
+                    and reid_emb is not None and len(reid_emb) > 0):
                 reid_match = find_person_by_embedding(
                     reid_emb, db=db,
                     threshold=self.REID_THRESHOLD,
                     embedding_field="reid_embedding",
                 )
-                if reid_match:
+                if (reid_match
+                        and reid_match["unique_code"] not in exclude_codes
+                        and not _face_veto(
+                            query_face_emb, reid_match["unique_code"], db, self.FACE_VETO_THRESHOLD
+                        )):
                     return {
                         "unique_code": reid_match["unique_code"],
                         "method":      "body_structure",
@@ -198,21 +259,27 @@ class SmartIdentifier:
                         "color_hex":   color_info["hex_color"] if color_info else None,
                         "embedding":   None,
                     }
-                reid_score = 0.0
         except Exception as exc:
             logger.debug("SmartIdentifier.reid failed: %s", exc)
 
-        # ── Method 5: New Registration ───────────────────────────────────────
+        # ── No match: register only when the caller confirms the track AND a
+        # face is visible — identity is face-anchored; a faceless box (person
+        # turned away, or a YOLO false positive) stays "Detecting..." ────────
+        if not allow_new or query_face_emb is None:
+            return {
+                "unique_code": "Detecting...",
+                "method":      "pending",
+                "confidence":  0.0,
+                "color_hex":   color_info["hex_color"] if color_info else None,
+                "embedding":   None,
+            }
+
+        # ── Method 5: New Registration (reuses embeddings computed above) ───
         seq = get_next_sdt_number(db)
         new_code = f"SDT-{seq:04d}"
 
         try:
-            recognizer = _get_face_recognizer()
-            face_embs = recognizer.extract_embedding(frame)
-            face_emb_json = json.dumps(face_embs[0].tolist()) if face_embs else None
-
-            reid = _get_reid_model()
-            reid_emb = reid.extract_features(person_crop)
+            face_emb_json = json.dumps(query_face_emb.tolist())
             reid_emb_json = json.dumps(reid_emb.tolist()) if reid_emb is not None else None
 
             height_ratio = round(h / max(fh, 1), 4)

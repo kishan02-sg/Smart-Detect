@@ -17,6 +17,8 @@ torch>=2.0.0
 torchvision>=0.15.0
 opencv-python==4.9.0.80
 deep-sort-realtime==1.3.2
+ultralytics>=8.0.0           # YOLOv8 detection
+supervision>=0.26,<0.30      # ByteTrack + zones (0.30 moves ByteTrack to `trackers` pkg)
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 PyJWT==2.8.0

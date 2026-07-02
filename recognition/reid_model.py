@@ -80,6 +80,11 @@ class PersonReID:
         self._stub_mode = False
         self._load_model()
 
+    @property
+    def is_stub(self) -> bool:
+        """True when running the colour-histogram fallback instead of OSNet."""
+        return self._stub_mode
+
     # ─────────────────────────────────────────────────────────────────────────
     # Initialisation
     # ─────────────────────────────────────────────────────────────────────────
