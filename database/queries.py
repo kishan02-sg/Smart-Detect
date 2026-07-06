@@ -45,16 +45,20 @@ def find_person_by_embedding(
     db: Session,
     threshold: float = 0.6,
     embedding_field: str = "face_embedding",
+    exclude_codes: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Search persons table for closest embedding match.
     Uses pgvector cosine distance on PostgreSQL, Python cosine similarity on SQLite.
+
+    exclude_codes: SDT codes that may not be returned — used to stop one code
+    being assigned to two people visible in the same scene.
     """
     logger.debug("query.match_start", message=f"Searching {embedding_field} with threshold={threshold}")
 
     if _is_postgres(db):
-        return _find_person_pgvector(embedding, db, threshold, embedding_field)
-    return _find_person_python(embedding, db, threshold, embedding_field)
+        return _find_person_pgvector(embedding, db, threshold, embedding_field, exclude_codes)
+    return _find_person_python(embedding, db, threshold, embedding_field, exclude_codes)
 
 
 def _find_person_pgvector(
@@ -62,22 +66,29 @@ def _find_person_pgvector(
     db: Session,
     threshold: float,
     embedding_field: str,
+    exclude_codes: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     """pgvector cosine distance search — runs entirely in the database."""
+    from sqlalchemy import bindparam
+
     col = "reid_embedding" if embedding_field == "reid_embedding" else "face_embedding"
     vec_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
-    row = db.execute(
-        text(f"""
-            SELECT unique_code,
-                   1 - ({col}::vector <=> :vec::vector) AS similarity
-            FROM persons
-            WHERE {col} IS NOT NULL
-            ORDER BY {col}::vector <=> :vec::vector
-            LIMIT 1
-        """),
-        {"vec": vec_str},
-    ).fetchone()
+    excl_clause = "AND unique_code NOT IN :excl" if exclude_codes else ""
+    stmt = text(f"""
+        SELECT unique_code,
+               1 - ({col}::vector <=> :vec::vector) AS similarity
+        FROM persons
+        WHERE {col} IS NOT NULL {excl_clause}
+        ORDER BY {col}::vector <=> :vec::vector
+        LIMIT 1
+    """)
+    params: Dict[str, Any] = {"vec": vec_str}
+    if exclude_codes:
+        stmt = stmt.bindparams(bindparam("excl", expanding=True))
+        params["excl"] = list(exclude_codes)
+
+    row = db.execute(stmt, params).fetchone()
 
     if row is None or row.similarity < threshold:
         return None
@@ -91,6 +102,7 @@ def _find_person_python(
     db: Session,
     threshold: float,
     embedding_field: str,
+    exclude_codes: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     """Python-side cosine similarity scan — works on SQLite."""
     if embedding_field == "reid_embedding":
@@ -99,6 +111,9 @@ def _find_person_python(
     else:
         persons = db.query(Person).filter(Person.face_embedding.isnot(None)).all()
         def get_stored(p): return p.face_embedding
+
+    if exclude_codes:
+        persons = [p for p in persons if p.unique_code not in exclude_codes]
 
     if not persons:
         return None

@@ -91,6 +91,11 @@ _MIN_TRACK_AGE_FOR_REGISTRATION = 3
 # Movement-trail length (analysis cycles) drawn behind each tracked person
 _TRAIL_LENGTH = 30
 
+# Faces smaller/blurrier than this are drawn but never decide identity —
+# far-away faces give noisy embeddings that cross-match strangers
+_MIN_FACE_HEIGHT_PX  = 48
+_MIN_FACE_DET_SCORE  = 0.60
+
 
 class LiveStream:
     """
@@ -463,7 +468,19 @@ class LiveStream:
                     except Exception:
                         continue
 
-                face_emb = getattr(matched_face, "embedding", None) if matched_face is not None else None
+                # Quality gate: tiny or low-confidence faces give noisy
+                # embeddings that cross-match strangers — draw them, but never
+                # let them decide identity (match OR register)
+                face_emb = None
+                if matched_face is not None:
+                    try:
+                        fb_q = matched_face.bbox
+                        face_h = float(fb_q[3] - fb_q[1])
+                        det_sc = float(getattr(matched_face, "det_score", 1.0) or 1.0)
+                        if face_h >= _MIN_FACE_HEIGHT_PX and det_sc >= _MIN_FACE_DET_SCORE:
+                            face_emb = getattr(matched_face, "embedding", None)
+                    except Exception:
+                        face_emb = getattr(matched_face, "embedding", None)
 
                 # ── Identify: cached per tracker_id, registration age-gated ──
                 code, method, conf = "Detecting...", "pending", 0.0
@@ -483,6 +500,9 @@ class LiveStream:
                                 allow_new=self._track_age[tid] >= _MIN_TRACK_AGE_FOR_REGISTRATION,
                                 face_embedding=face_emb,
                                 exclude_codes=claimed_codes,
+                                # full-frame scan already found every face —
+                                # a per-person InsightFace rerun just burns CPU
+                                extract_face_if_missing=False,
                             )
                             code   = result["unique_code"]
                             method = result["method"]

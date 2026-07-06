@@ -144,6 +144,32 @@ class SmartIdentifier:
     # reject colour/Re-ID matches to that candidate (face veto)
     FACE_VETO_THRESHOLD = 0.30
 
+    # Running-average template update: each confident match blends the fresh
+    # embedding into the stored one, so memory adapts to new lighting/angles
+    # instead of staying frozen at the registration-day snapshot.
+    TEMPLATE_BLEND = 0.20   # weight of the new embedding
+
+    def _update_face_template(self, unique_code: str, query_emb: np.ndarray, db) -> None:
+        try:
+            person = db.query(Person).filter(Person.unique_code == unique_code).first()
+            if person is None or not person.face_embedding:
+                return
+            stored = np.array(json.loads(person.face_embedding), dtype=np.float32)
+            if stored.shape != query_emb.shape:
+                return
+            blended = (1.0 - self.TEMPLATE_BLEND) * stored + self.TEMPLATE_BLEND * query_emb
+            norm = np.linalg.norm(blended)
+            if norm > 0:
+                blended = blended / norm * np.linalg.norm(stored)
+            person.face_embedding = json.dumps(blended.tolist())
+            db.commit()
+        except Exception as exc:
+            logger.debug("face template update failed: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
     def identify(
         self,
         frame: np.ndarray,
@@ -154,6 +180,7 @@ class SmartIdentifier:
         allow_new: bool = True,
         face_embedding: Optional[np.ndarray] = None,
         exclude_codes: Optional[set] = None,
+        extract_face_if_missing: bool = True,
     ) -> Dict:
         """
         Run the full 4-method pipeline and return result dict.
@@ -195,14 +222,18 @@ class SmartIdentifier:
         try:
             if face_embedding is not None:
                 query_face_emb = np.asarray(face_embedding, dtype=np.float32)
-            elif person_crop.size > 0:
+            elif extract_face_if_missing and person_crop.size > 0:
                 recognizer = _get_face_recognizer()
                 embs = recognizer.extract_embedding(person_crop) or []
                 if embs:
                     query_face_emb = embs[0]
             if query_face_emb is not None:
-                match = find_person_by_embedding(query_face_emb, db=db, threshold=self.FACE_THRESHOLD)
+                match = find_person_by_embedding(
+                    query_face_emb, db=db, threshold=self.FACE_THRESHOLD,
+                    exclude_codes=exclude_codes,
+                )
                 if match:
+                    self._update_face_template(match["unique_code"], query_face_emb, db)
                     return {
                         "unique_code": match["unique_code"],
                         "method":      "face",
