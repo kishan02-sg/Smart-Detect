@@ -5,6 +5,7 @@ import TopBar  from './components/TopBar.jsx'
 import Dashboard   from './pages/Dashboard.jsx'
 import PhotoSearch from './pages/PhotoSearch.jsx'
 import LiveCamera  from './pages/LiveCamera.jsx'
+import People      from './pages/People.jsx'
 import Locations   from './pages/Locations.jsx'
 import ObjectFeed  from './pages/ObjectFeed.jsx'
 import Alerts      from './pages/Alerts.jsx'
@@ -14,6 +15,7 @@ const PAGE_TITLES = {
   '/':          'Dashboard',
   '/search':    'Photo Search',
   '/live':      'Live Camera',
+  '/people':    'People',
   '/locations': 'Locations',
   '/objects':   'Object Feed',
   '/alerts':    'Alerts',
@@ -37,6 +39,7 @@ function AppShell() {
             <Route path="/"          element={<Dashboard />} />
             <Route path="/search"    element={<PhotoSearch />} />
             <Route path="/live"      element={<LiveCamera />} />
+            <Route path="/people"    element={<People />} />
             <Route path="/locations" element={<Locations />} />
             <Route path="/objects"   element={<ObjectFeed />} />
             <Route path="/alerts"    element={<Alerts />} />

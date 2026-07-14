@@ -72,7 +72,31 @@ def get_db() -> Generator[Session, None, None]:
 
 
 # ─── Table Initialisation ─────────────────────────────────────────────────────
+
+# Columns added after the first release — create_all() does not alter existing
+# tables, so add them here. (name, SQL type) pairs; types valid on both
+# SQLite and PostgreSQL.
+_PERSONS_NEW_COLUMNS = [
+    ("display_name",   "VARCHAR(128)"),
+    ("face_templates", "TEXT"),
+    ("photo_path",     "TEXT"),
+]
+
+
+def _migrate_new_columns() -> None:
+    from sqlalchemy import inspect, text  # noqa: PLC0415
+    insp = inspect(engine)
+    if not insp.has_table("persons"):
+        return
+    existing = {c["name"] for c in insp.get_columns("persons")}
+    with engine.begin() as conn:
+        for name, sql_type in _PERSONS_NEW_COLUMNS:
+            if name not in existing:
+                conn.execute(text(f"ALTER TABLE persons ADD COLUMN {name} {sql_type}"))
+
+
 def init_db() -> None:
     """Create all tables. Call once at application startup."""
     from database.models import Base  # noqa: PLC0415
     Base.metadata.create_all(bind=engine)
+    _migrate_new_columns()

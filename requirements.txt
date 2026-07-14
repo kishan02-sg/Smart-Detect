@@ -12,7 +12,16 @@ alembic==1.13.1
 # ─── ML / Vision ──────────────────────────────────────────────────────────────
 insightface==0.7.3
 onnxruntime==1.17.1          # CPU inference for insightface
-torchreid==1.4.0
+# insightface pulls albumentations (mask_renderer) unconditionally. Pinned:
+# newer albumentations (>=2.0) depends on albucore>=0.0.20, which added a
+# native stringzilla DLL that Windows Application Control blocks as untrusted,
+# breaking face recognition entirely. These versions predate that dependency.
+albumentations==1.4.15
+albucore==0.0.16
+# Body re-ID: OSNet architecture is vendored (recognition/osnet_arch.py) because
+# torchreid never shipped a working PyPI package. Weights: scripts/fetch_osnet.py
+gdown>=5.0                   # downloads OSNet weights from the model zoo
+truststore>=0.10             # this machine's TLS is intercepted; use OS cert store
 torch>=2.0.0
 torchvision>=0.15.0
 opencv-python==4.9.0.80

@@ -25,6 +25,73 @@ except ImportError:
     _DEVICE = "cpu"
 
 
+# Re-ID-trained OSNet weights (scripts/fetch_osnet.py)
+_OSNET_WEIGHTS = "models/osnet_x1_0_reid.pth"
+
+
+class _TorchOsnetExtractor:
+    """
+    OSNet x1.0 via the vendored architecture (recognition/osnet_arch.py) —
+    used because the torchreid package does not build on Python 3.14.
+    Prefers the re-ID-trained weights file; falls back to ImageNet weights.
+    """
+
+    _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    _STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+    def __init__(self, device: str = "cpu") -> None:
+        import os.path as osp
+
+        import torch
+        from recognition.osnet_arch import osnet_x1_0
+
+        self._torch  = torch
+        self._device = device
+
+        if osp.exists(_OSNET_WEIGHTS):
+            self._model = osnet_x1_0(num_classes=1, pretrained=False)
+            self._load_weights(_OSNET_WEIGHTS)
+            logger.info("PersonReID: loaded OSNet re-ID weights from %s", _OSNET_WEIGHTS)
+        else:
+            # ImageNet fallback — downloads via gdown; needs the system cert
+            # store because this machine's HTTPS is intercepted
+            try:
+                import truststore
+                truststore.inject_into_ssl()
+            except ImportError:
+                pass
+            self._model = osnet_x1_0(pretrained=True)
+            logger.warning("PersonReID: %s not found — using ImageNet OSNet weights "
+                           "(run scripts/fetch_osnet.py for better accuracy)", _OSNET_WEIGHTS)
+
+        self._model.to(device)
+        self._model.eval()
+
+    def _load_weights(self, path: str) -> None:
+        """Load a torchreid checkpoint, skipping classifier heads that don't fit."""
+        checkpoint = self._torch.load(path, map_location="cpu", weights_only=False)
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        model_dict = self._model.state_dict()
+        filtered = {}
+        for k, v in state_dict.items():
+            k = k.removeprefix("module.")
+            if k in model_dict and model_dict[k].shape == v.shape:
+                filtered[k] = v
+        self._model.load_state_dict(filtered, strict=False)
+
+    def __call__(self, images: list) -> "list[np.ndarray]":
+        torch = self._torch
+        batch = []
+        for img in images:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            rgb = (rgb - self._MEAN) / self._STD
+            batch.append(rgb.transpose(2, 0, 1))
+        x = torch.from_numpy(np.stack(batch)).to(self._device)
+        with torch.no_grad():
+            feats = self._model(x)
+        return [f.cpu().numpy() for f in feats]
+
+
 # ─── Lightweight stub used when torchreid is not available ───────────────────
 
 class _StubExtractor:
@@ -91,28 +158,16 @@ class PersonReID:
 
     def _load_model(self) -> None:
         """
-        Load OSNet-x1.0 pretrained on Market-1501.
-        Falls back to colour-histogram stub if torchreid is unavailable.
+        Load OSNet-x1.0 via the vendored architecture + re-ID weights.
+        Falls back to colour-histogram stub if torch is unavailable.
         """
         try:
-            import torchreid  # noqa: PLC0415
-
-            self._extractor = torchreid.utils.FeatureExtractor(
-                model_name=self.MODEL_NAME,
-                model_path="",          # empty → download pretrained weights
-                device=self._device,
-            )
-            logger.info("PersonReID: loaded %s on %s", self.MODEL_NAME, self._device)
-        except ImportError:
-            logger.warning(
-                "torchreid not installed — using colour-histogram stub for Re-ID. "
-                "Install with: pip install torchreid  (requires torch)"
-            )
-            self._extractor = _StubExtractor()
-            self._stub_mode = True
+            self._extractor = _TorchOsnetExtractor(device=self._device)
+            logger.info("PersonReID: OSNet ready on %s", self._device)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Failed to load torchreid model (%s) — using colour-histogram stub.", exc
+                "Failed to load OSNet (%s) — using colour-histogram stub. "
+                "Re-ID identity matching is disabled in stub mode.", exc
             )
             self._extractor = _StubExtractor()
             self._stub_mode = True

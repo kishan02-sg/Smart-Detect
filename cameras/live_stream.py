@@ -27,12 +27,14 @@ import time
 import warnings
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from database.db import SessionLocal
+from database.models import Person
 from database.queries import log_sighting, check_watchlist_alert
 
 logger = logging.getLogger(__name__)
@@ -484,6 +486,7 @@ class LiveStream:
 
                 # ── Identify: cached per tracker_id, registration age-gated ──
                 code, method, conf = "Detecting...", "pending", 0.0
+                label              = "Detecting..."
                 color_hex_from_id  = None
                 if tid is not None:
                     seen_tids.add(tid)
@@ -491,6 +494,7 @@ class LiveStream:
                     cached = self._track_codes.get(tid)
                     if cached:
                         code, method, conf = cached["code"], cached["method"], cached["conf"]
+                        label = cached.get("label", code)
                     elif self._identifier:
                         try:
                             result = self._identifier.identify(
@@ -509,7 +513,17 @@ class LiveStream:
                             conf   = result["confidence"]
                             color_hex_from_id = result.get("color_hex")
                             if code != "Detecting...":
-                                self._track_codes[tid] = {"code": code, "method": method, "conf": conf}
+                                # Named enrollment: label shows the person's
+                                # name once an operator has set one
+                                label = code
+                                try:
+                                    prow = db.query(Person).filter(Person.unique_code == code).first()
+                                    if prow is not None and getattr(prow, "display_name", None):
+                                        label = f"{prow.display_name} ({code})"
+                                except Exception:
+                                    pass
+                                self._track_codes[tid] = {"code": code, "method": method,
+                                                          "conf": conf, "label": label}
                                 self.active_tracks[tid] = code
                                 claimed_codes.add(code)
                         except Exception as exc:
@@ -580,6 +594,9 @@ class LiveStream:
                     if now - self._seen_cache.get(code, 0) > 30:
                         self._seen_cache[code] = now
                         self.persons_today += (1 if method == "new_registration" else 0)
+                        snap_path = self._save_sighting_snapshot(
+                            code, frame[max(0, y):min(fh, y2), max(0, x):min(fw, x2)]
+                        )
                         try:
                             log_sighting(
                                 unique_code=code,
@@ -588,6 +605,7 @@ class LiveStream:
                                 camera_id=self.camera_id,
                                 confidence=conf,
                                 db=db,
+                                frame_path=snap_path,
                             )
                             check_watchlist_alert(
                                 unique_code=code,
@@ -614,6 +632,7 @@ class LiveStream:
                     "tracker_id":   tid,
                     "bbox":         [x, y, w, h],
                     "code":         code,
+                    "label":        label,
                     "method":       method,
                     "conf":         conf,
                     "color_hex":    color_hex,
@@ -715,8 +734,8 @@ class LiveStream:
                 except Exception:
                     pass
 
-            # SDT label + gender above box
-            id_text = code
+            # Name/SDT label + gender above box
+            id_text = p.get("label") or code
             if p["gender"]:
                 id_text += f" {p['gender']}"
             (tw, th_t), _ = cv2.getTextSize(id_text, _FONT, 0.50, 2)
@@ -804,6 +823,30 @@ class LiveStream:
             dominant_bgr = centers[np.argmax(counts)].astype(np.uint8)
             return (int(dominant_bgr[2]), int(dominant_bgr[1]), int(dominant_bgr[0]))  # RGB
         except Exception:
+            return None
+
+    _MAX_SNAPSHOTS_PER_PERSON = 20
+
+    def _save_sighting_snapshot(self, code: str, crop: np.ndarray) -> Optional[str]:
+        """Save a person crop for this sighting; keep only the newest files."""
+        try:
+            if crop is None or crop.size == 0:
+                return None
+            snap_dir = Path("snapshots") / code
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            fname = snap_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            if not cv2.imwrite(str(fname), crop):
+                return None
+            # Prune oldest sighting shots (never registered.jpg)
+            shots = sorted(p for p in snap_dir.glob("*.jpg") if p.name != "registered.jpg")
+            for old in shots[:-self._MAX_SNAPSHOTS_PER_PERSON]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            return fname.as_posix()
+        except Exception as exc:
+            logger.debug("sighting snapshot failed: %s", exc)
             return None
 
     @staticmethod

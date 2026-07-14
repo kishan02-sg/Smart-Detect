@@ -63,7 +63,10 @@ class Person(Base):
 
     id                = Column(String(36),  primary_key=True, default=_uuid)
     unique_code       = Column(String(32),  nullable=False, unique=True, index=True)
-    face_embedding    = Column(Text,        nullable=True)
+    display_name      = Column(String(128), nullable=True)   # human name for the code
+    face_embedding    = Column(Text,        nullable=True)   # primary template (flat vector, pgvector-castable)
+    face_templates    = Column(Text,        nullable=True)   # JSON list of vectors — multi-view gallery
+    photo_path        = Column(Text,        nullable=True)   # registration crop, served under /snapshots
     reid_embedding    = Column(Text,        nullable=True)
     dress_color_hsv   = Column(Text,        nullable=True)
     body_height_ratio = Column(Float,       nullable=True)

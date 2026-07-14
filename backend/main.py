@@ -84,6 +84,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Person snapshot photos (registration + sightings) — written by the camera
+# pipeline under ./snapshots/{SDT-code}/
+from pathlib import Path as _Path
+from fastapi.staticfiles import StaticFiles
+_Path("snapshots").mkdir(exist_ok=True)
+app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
+
 # ─── Rate Limiting (in-memory, no external dependency) ───────────────────────
 _rate_buckets: Dict[str, List[float]] = defaultdict(list)
 
@@ -330,6 +337,8 @@ def list_persons(
         return [
             {
                 "unique_code":     p.unique_code,
+                "display_name":    getattr(p, "display_name", None),
+                "photo_path":      getattr(p, "photo_path", None),
                 "person_type":     p.person_type,
                 "location_id":     p.location_id,
                 "total_sightings": getattr(p, "total_sightings", None) or 0,
@@ -344,8 +353,49 @@ def list_persons(
         return []
 
 
+class PersonUpdateRequest(BaseModel):
+    display_name: Optional[str] = Field(None, max_length=128)
+    person_type:  Optional[str] = Field(None, description="visitor | staff | unknown")
+
+
+@app.put("/persons/{unique_code}", tags=["Person"])
+def update_person(
+    unique_code: str,
+    payload:     PersonUpdateRequest,
+    db:          Session   = Depends(get_db),
+    token:       TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    """Attach a display name / person type to an SDT code (named enrollment)."""
+    person = db.query(Person).filter(Person.unique_code == unique_code).first()
+    if not person:
+        raise HTTPException(status_code=404, detail=f"Person '{unique_code}' not found.")
+    if payload.display_name is not None:
+        person.display_name = payload.display_name.strip() or None
+    if payload.person_type is not None:
+        person.person_type = payload.person_type
+    db.commit()
+    logger.info("person.update",
+                message=f"'{token.username}' set {unique_code}: name={person.display_name!r} type={person.person_type}")
+    return {
+        "unique_code":  person.unique_code,
+        "display_name": person.display_name,
+        "person_type":  person.person_type,
+    }
+
+
+def _names_for(codes: List[str], db: Session) -> Dict[str, str]:
+    """unique_code → display_name for the codes that have one."""
+    if not codes:
+        return {}
+    try:
+        rows = db.query(Person).filter(Person.unique_code.in_(codes)).all()
+        return {p.unique_code: p.display_name for p in rows if getattr(p, "display_name", None)}
+    except Exception:
+        return {}
+
+
 @app.get("/persons/live", tags=["Person"])
-def live_persons() -> List[Dict[str, Any]]:
+def live_persons(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     all_live: List[Dict] = []
     for stream in active_streams.values():
         try:
@@ -363,6 +413,9 @@ def live_persons() -> List[Dict[str, Any]]:
                 })
         except Exception:
             pass
+    names = _names_for([e["unique_code"] for e in all_live], db)
+    for e in all_live:
+        e["display_name"] = names.get(e["unique_code"])
     return all_live
 
 
@@ -663,6 +716,9 @@ def camera_detections_recent(
         try:
             recents = stream.get_recent_detections(limit)
             if recents:
+                names = _names_for([r["unique_code"] for r in recents], db)
+                for r in recents:
+                    r["display_name"] = names.get(r["unique_code"])
                 return recents
         except Exception:
             pass

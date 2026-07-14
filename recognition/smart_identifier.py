@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
@@ -136,10 +137,12 @@ class SmartIdentifier:
 
     FACE_THRESHOLD  = 0.50   # ArcFace cosine sim — 0.35 cross-matched strangers
     COLOR_THRESHOLD = 30.0
-    REID_THRESHOLD  = 0.55
+    REID_THRESHOLD  = 0.60   # OSNet cosine sim (re-ID-trained weights)
     MULTI_THRESHOLD = 0.65
     # Colour/Re-ID may only re-associate someone seen this recently (minutes)
     COLOR_RECENT_MINUTES = 10.0
+    # Body features track clothing — trust them across hours, not days
+    REID_RECENT_MINUTES  = 720.0
     # If the query face clearly differs from a candidate's stored face,
     # reject colour/Re-ID matches to that candidate (face veto)
     FACE_VETO_THRESHOLD = 0.30
@@ -148,8 +151,19 @@ class SmartIdentifier:
     # embedding into the stored one, so memory adapts to new lighting/angles
     # instead of staying frozen at the registration-day snapshot.
     TEMPLATE_BLEND = 0.20   # weight of the new embedding
+    # Gallery: keep extra templates for usefully DIFFERENT views. A match
+    # above this is near-identical to what we already store — skip it.
+    GALLERY_APPEND_MAX_SIM = 0.85
+    GALLERY_MAX_TEMPLATES  = 5
 
-    def _update_face_template(self, unique_code: str, query_emb: np.ndarray, db) -> None:
+    def _update_face_template(
+        self,
+        unique_code: str,
+        query_emb: np.ndarray,
+        db,
+        similarity: float = 1.0,
+        person_crop: Optional[np.ndarray] = None,
+    ) -> None:
         try:
             person = db.query(Person).filter(Person.unique_code == unique_code).first()
             if person is None or not person.face_embedding:
@@ -162,6 +176,31 @@ class SmartIdentifier:
             if norm > 0:
                 blended = blended / norm * np.linalg.norm(stored)
             person.face_embedding = json.dumps(blended.tolist())
+
+            # Gallery append: this view matched but looks different enough to
+            # be worth remembering separately (new lighting/angle)
+            if similarity < self.GALLERY_APPEND_MAX_SIM:
+                try:
+                    templates = json.loads(person.face_templates) if person.face_templates else []
+                except Exception:
+                    templates = []
+                templates.append(query_emb.tolist())
+                if len(templates) > self.GALLERY_MAX_TEMPLATES:
+                    templates = templates[-self.GALLERY_MAX_TEMPLATES:]
+                person.face_templates = json.dumps(templates)
+
+            # Re-ID template refresh: face just confirmed identity, so store
+            # TODAY's clothing/body features (re-ID is clothing-dependent)
+            if person_crop is not None and person_crop.size > 0:
+                try:
+                    reid = _get_reid_model()
+                    if not getattr(reid, "is_stub", False):
+                        reid_emb = reid.extract_features(person_crop)
+                        if reid_emb is not None and len(reid_emb) > 0:
+                            person.reid_embedding = json.dumps(reid_emb.tolist())
+                except Exception:
+                    pass
+
             db.commit()
         except Exception as exc:
             logger.debug("face template update failed: %s", exc)
@@ -233,7 +272,10 @@ class SmartIdentifier:
                     exclude_codes=exclude_codes,
                 )
                 if match:
-                    self._update_face_template(match["unique_code"], query_face_emb, db)
+                    self._update_face_template(
+                        match["unique_code"], query_face_emb, db,
+                        similarity=match["similarity"], person_crop=person_crop,
+                    )
                     return {
                         "unique_code": match["unique_code"],
                         "method":      "face",
@@ -277,6 +319,7 @@ class SmartIdentifier:
                     reid_emb, db=db,
                     threshold=self.REID_THRESHOLD,
                     embedding_field="reid_embedding",
+                    recent_minutes=self.REID_RECENT_MINUTES,
                 )
                 if (reid_match
                         and reid_match["unique_code"] not in exclude_codes
@@ -309,6 +352,18 @@ class SmartIdentifier:
         seq = get_next_sdt_number(db)
         new_code = f"SDT-{seq:04d}"
 
+        # Save the registration photo — evidence behind the code
+        photo_path = None
+        try:
+            if person_crop.size > 0:
+                snap_dir = Path("snapshots") / new_code
+                snap_dir.mkdir(parents=True, exist_ok=True)
+                photo_file = snap_dir / "registered.jpg"
+                if cv2.imwrite(str(photo_file), person_crop):
+                    photo_path = photo_file.as_posix()
+        except Exception as exc:
+            logger.debug("registration snapshot failed: %s", exc)
+
         try:
             face_emb_json = json.dumps(query_face_emb.tolist())
             reid_emb_json = json.dumps(reid_emb.tolist()) if reid_emb is not None else None
@@ -318,6 +373,8 @@ class SmartIdentifier:
             person = Person(
                 unique_code      = new_code,
                 face_embedding   = face_emb_json,
+                face_templates   = json.dumps([query_face_emb.tolist()]),
+                photo_path       = photo_path,
                 reid_embedding   = reid_emb_json,
                 dress_color_hsv  = json.dumps(color_info) if color_info else None,
                 body_height_ratio= height_ratio,

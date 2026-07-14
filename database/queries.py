@@ -46,6 +46,7 @@ def find_person_by_embedding(
     threshold: float = 0.6,
     embedding_field: str = "face_embedding",
     exclude_codes: Optional[set] = None,
+    recent_minutes: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Search persons table for closest embedding match.
@@ -53,12 +54,17 @@ def find_person_by_embedding(
 
     exclude_codes: SDT codes that may not be returned — used to stop one code
     being assigned to two people visible in the same scene.
+
+    recent_minutes: only consider persons seen within this window. Used for
+    re-ID matching — body features track clothing, which changes daily.
     """
     logger.debug("query.match_start", message=f"Searching {embedding_field} with threshold={threshold}")
 
     if _is_postgres(db):
-        return _find_person_pgvector(embedding, db, threshold, embedding_field, exclude_codes)
-    return _find_person_python(embedding, db, threshold, embedding_field, exclude_codes)
+        return _find_person_pgvector(embedding, db, threshold, embedding_field,
+                                     exclude_codes, recent_minutes)
+    return _find_person_python(embedding, db, threshold, embedding_field,
+                               exclude_codes, recent_minutes)
 
 
 def _find_person_pgvector(
@@ -67,6 +73,7 @@ def _find_person_pgvector(
     threshold: float,
     embedding_field: str,
     exclude_codes: Optional[set] = None,
+    recent_minutes: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """pgvector cosine distance search — runs entirely in the database."""
     from sqlalchemy import bindparam
@@ -74,12 +81,13 @@ def _find_person_pgvector(
     col = "reid_embedding" if embedding_field == "reid_embedding" else "face_embedding"
     vec_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
-    excl_clause = "AND unique_code NOT IN :excl" if exclude_codes else ""
+    excl_clause   = "AND unique_code NOT IN :excl" if exclude_codes else ""
+    recent_clause = "AND last_seen_at >= :cutoff" if recent_minutes is not None else ""
     stmt = text(f"""
         SELECT unique_code,
                1 - ({col}::vector <=> :vec::vector) AS similarity
         FROM persons
-        WHERE {col} IS NOT NULL {excl_clause}
+        WHERE {col} IS NOT NULL {excl_clause} {recent_clause}
         ORDER BY {col}::vector <=> :vec::vector
         LIMIT 1
     """)
@@ -87,6 +95,9 @@ def _find_person_pgvector(
     if exclude_codes:
         stmt = stmt.bindparams(bindparam("excl", expanding=True))
         params["excl"] = list(exclude_codes)
+    if recent_minutes is not None:
+        from datetime import timedelta
+        params["cutoff"] = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=recent_minutes)
 
     row = db.execute(stmt, params).fetchone()
 
@@ -103,14 +114,21 @@ def _find_person_python(
     threshold: float,
     embedding_field: str,
     exclude_codes: Optional[set] = None,
+    recent_minutes: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """Python-side cosine similarity scan — works on SQLite."""
     if embedding_field == "reid_embedding":
-        persons = db.query(Person).filter(Person.reid_embedding.isnot(None)).all()
+        q = db.query(Person).filter(Person.reid_embedding.isnot(None))
         def get_stored(p): return p.reid_embedding
     else:
-        persons = db.query(Person).filter(Person.face_embedding.isnot(None)).all()
+        q = db.query(Person).filter(Person.face_embedding.isnot(None))
         def get_stored(p): return p.face_embedding
+
+    if recent_minutes is not None:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=recent_minutes)
+        q = q.filter(Person.last_seen_at.isnot(None), Person.last_seen_at >= cutoff)
+    persons = q.all()
 
     if exclude_codes:
         persons = [p for p in persons if p.unique_code not in exclude_codes]
@@ -122,14 +140,27 @@ def _find_person_python(
     best_sim: float = -1.0
 
     for person in persons:
+        # Candidate vectors: the primary embedding plus (for faces) every
+        # gallery template — a person is as recognisable as their BEST view
+        candidates = []
         try:
-            stored = np.array(json.loads(get_stored(person)), dtype=np.float32)
+            candidates.append(np.array(json.loads(get_stored(person)), dtype=np.float32))
         except Exception:
-            continue
-        sim = _cosine_similarity(embedding, stored)
-        if sim > best_sim:
-            best_sim = sim
-            best_code = person.unique_code
+            pass
+        if embedding_field != "reid_embedding" and getattr(person, "face_templates", None):
+            try:
+                for vec in json.loads(person.face_templates):
+                    candidates.append(np.array(vec, dtype=np.float32))
+            except Exception:
+                pass
+
+        for stored in candidates:
+            if stored.shape != embedding.shape:
+                continue
+            sim = _cosine_similarity(embedding, stored)
+            if sim > best_sim:
+                best_sim = sim
+                best_code = person.unique_code
 
     if best_code is None or best_sim < threshold:
         return None
