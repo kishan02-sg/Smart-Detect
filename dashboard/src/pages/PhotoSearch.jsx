@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -156,6 +157,7 @@ function Timeline({ stops }) {
 
 /* ── PhotoSearch page ────────────────────────────── */
 export default function PhotoSearch() {
+  const navigate = useNavigate()
   const [file, setFile]           = useState(null)
   const [preview, setPreview]     = useState(null)
   const [faceOk, setFaceOk]       = useState(null)   // true | false | null
@@ -353,9 +355,21 @@ export default function PhotoSearch() {
           <div className="card fade-in" style={{ padding: 12 }}>
             {result.matched ? (
               <>
-                <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 600, color: '#111', marginBottom: 8 }}>
+                <button
+                  onClick={() => navigate(`/people?code=${encodeURIComponent(result.unique_code)}`)}
+                  title="View this person's appearances"
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8,
+                    padding: '4px 10px', borderRadius: 7, border: '0.5px solid #e0e0e0',
+                    background: '#f8f8f8', cursor: 'pointer', fontFamily: 'monospace',
+                    fontSize: 13, fontWeight: 600, color: '#111',
+                  }}
+                  onMouseEnter={e => { e.currentTarget.style.background = '#eef2ff' }}
+                  onMouseLeave={e => { e.currentTarget.style.background = '#f8f8f8' }}
+                >
                   {result.unique_code}
-                </div>
+                  <span style={{ fontSize: 10, color: '#6366f1', fontFamily: 'inherit' }}>view appearances →</span>
+                </button>
                 <dl style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                   {[
                     ['Cameras searched', result.cameras_searched ?? 1],

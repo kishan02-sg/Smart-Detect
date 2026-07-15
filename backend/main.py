@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -90,6 +90,9 @@ from pathlib import Path as _Path
 from fastapi.staticfiles import StaticFiles
 _Path("snapshots").mkdir(exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory="snapshots"), name="snapshots")
+
+# Uploaded surveillance videos, analysed like live cameras
+_Path("uploads").mkdir(exist_ok=True)
 
 # ─── Rate Limiting (in-memory, no external dependency) ───────────────────────
 _rate_buckets: Dict[str, List[float]] = defaultdict(list)
@@ -145,9 +148,17 @@ def startup_event() -> None:
                     db.commit()
                     logger.info("startup", message="Created default camera CAM-001")
 
-                # Start LiveStream on webcam 0
+                # Resolve source the same way POST /camera/start does — CAM-001
+                # may since have been repointed at an RTSP URL or uploaded
+                # video rather than the original default webcam
+                source: Union[int, str] = cam.source
+                try:
+                    source = int(source)
+                except (ValueError, TypeError):
+                    pass
+
                 stream = LiveStream(
-                    source=0,
+                    source=source,
                     location_id=cam.location_id,
                     zone_id=cam.zone_id,
                     camera_id="CAM-001",
@@ -158,7 +169,7 @@ def startup_event() -> None:
                 # Mark as active in DB
                 cam.is_active = True
                 db.commit()
-                logger.info("startup", message="Auto-started webcam CAM-001 (source=0)")
+                logger.info("startup", message=f"Auto-started CAM-001 (source={source})")
             finally:
                 db.close()
         except Exception as exc:
@@ -419,6 +430,44 @@ def live_persons(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     return all_live
 
 
+# NOTE: registered after /persons/live so "live" is never captured as a code
+@app.get("/persons/{unique_code}", tags=["Person"])
+def person_detail(
+    unique_code: str,
+    db:          Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Full person detail: identity fields + every appearance (sightings with
+    snapshot frames) — powers the "click the ID, see them in the video" view.
+    """
+    person = db.query(Person).filter(Person.unique_code == unique_code).first()
+    if not person:
+        raise HTTPException(status_code=404, detail=f"Person '{unique_code}' not found.")
+
+    trail = get_person_trail(unique_code, db=db)
+    appearances = [
+        {
+            "camera_id":     t.get("camera_id"),
+            "zone_id":       t.get("zone_id"),
+            "location_name": t.get("location_name"),
+            "seen_at":       t.get("seen_at"),
+            "confidence":    t.get("confidence"),
+            "snapshot":      t.get("frame_snapshot_path"),
+        }
+        for t in trail
+    ]
+    return {
+        "unique_code":     person.unique_code,
+        "display_name":    getattr(person, "display_name", None),
+        "person_type":     person.person_type,
+        "photo_path":      getattr(person, "photo_path", None),
+        "total_sightings": person.total_sightings or 0,
+        "first_seen_at":   person.first_seen_at.isoformat() if person.first_seen_at else None,
+        "last_seen_at":    person.last_seen_at.isoformat() if person.last_seen_at else None,
+        "appearances":     appearances,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Location Routes
 # ─────────────────────────────────────────────────────────────────────────────
@@ -465,13 +514,17 @@ def list_cameras(
         # merge with live is_active from active_streams
         cam_list = []
         for c in cams:
-            is_live = c.id in active_streams
+            stream  = active_streams.get(c.id)
+            is_live = stream is not None
+            # A finished video stream lingers in active_streams until evicted
+            # on next start — don't report it as active
+            finished = bool(is_live and getattr(stream, "_finished", False))
             cam_list.append({
                 "id":        c.id,
                 "zone_id":   c.zone_id,
                 "label":     c.label,
                 "source":    c.source,
-                "is_active": is_live or c.is_active,
+                "is_active": (is_live and not finished) or c.is_active,
                 "created_at": c.created_at.isoformat() if c.created_at else None,
             })
         result.append({
@@ -481,6 +534,16 @@ def list_cameras(
             "cameras":       cam_list,
         })
     return result
+
+
+def _next_camera_id(db: Session) -> str:
+    """Server-generated sequential camera ID (CAM-001, CAM-002, …)."""
+    existing = db.query(CameraModel).count()
+    cam_id = f"CAM-{existing + 1:03d}"
+    while db.query(CameraModel).filter(CameraModel.id == cam_id).first():
+        existing += 1
+        cam_id = f"CAM-{existing + 1:03d}"
+    return cam_id
 
 
 @app.post("/cameras", tags=["Camera"], status_code=status.HTTP_201_CREATED)
@@ -494,12 +557,7 @@ def create_camera(
     if not loc:
         raise HTTPException(status_code=404, detail=f"Location '{payload.location_id}' not found.")
 
-    # Auto-generate camera ID
-    existing = db.query(CameraModel).count()
-    cam_id = f"CAM-{existing + 1:03d}"
-    while db.query(CameraModel).filter(CameraModel.id == cam_id).first():
-        existing += 1
-        cam_id = f"CAM-{existing + 1:03d}"
+    cam_id = _next_camera_id(db)
 
     from datetime import datetime
     cam = CameraModel(
@@ -520,6 +578,114 @@ def create_camera(
         "label":       cam.label,
         "source":      cam.source,
         "is_active":   cam.is_active,
+    }
+
+
+# ── Video upload: analyse a pre-recorded surveillance clip like a camera ─────
+_VIDEO_EXTENSIONS   = {".mp4", ".avi", ".mov", ".mkv"}
+_MAX_VIDEO_BYTES    = 500 * 1024 * 1024   # 500 MB
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+@app.post("/cameras/upload", tags=["Camera"], status_code=status.HTTP_201_CREATED)
+def upload_video_camera(
+    request:     Request,
+    file:        UploadFile = File(..., description="Surveillance video (.mp4/.avi/.mov/.mkv)"),
+    location_id: str = Form(...),
+    zone_id:     str = Form("main"),
+    label:       str = Form("Uploaded Video"),
+    db:          Session   = Depends(get_db),
+    token:       TokenData = Depends(require_operator),
+) -> Dict[str, Any]:
+    """
+    Upload a surveillance video and register it as a (file-backed) camera.
+    Start it with POST /camera/start like any other camera; it plays at native
+    speed, runs the full detection pipeline, and goes offline at end of video.
+    """
+    _check_rate_limit(request, max_calls=10, window_seconds=60)
+
+    loc = db.query(Location).filter(Location.id == location_id).first()
+    if not loc:
+        raise HTTPException(status_code=404, detail=f"Location '{location_id}' not found.")
+
+    # The client filename is used ONLY to read the extension — the stored name
+    # is fully server-generated (no path traversal, no attacker-chosen names)
+    ext = _Path(file.filename or "").suffix.lower()
+    if ext not in _VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unsupported file type '{ext or 'none'}'. Allowed: {', '.join(sorted(_VIDEO_EXTENSIONS))}",
+        )
+
+    cam_id    = _next_camera_id(db)
+    dest_path = _Path("uploads") / f"{cam_id}{ext}"
+
+    # Stream to disk in chunks; abort past the size cap (no full read into RAM)
+    written = 0
+    try:
+        with open(dest_path, "wb") as out:
+            while True:
+                chunk = file.file.read(_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _MAX_VIDEO_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"Video exceeds the {_MAX_VIDEO_BYTES // (1024*1024)} MB limit.",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        dest_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        dest_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}") from exc
+
+    if written == 0:
+        dest_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+
+    # Content sanity check: must actually decode as video (an .exe renamed to
+    # .mp4 fails here) — extension alone is never trusted
+    probe = cv2.VideoCapture(str(dest_path))
+    try:
+        ok, _frame = probe.read()
+        native_fps  = probe.get(cv2.CAP_PROP_FPS) or 0
+        frame_count = int(probe.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    finally:
+        probe.release()
+    if not ok:
+        dest_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="File is not a readable video.")
+
+    from datetime import datetime
+    cam = CameraModel(
+        id=cam_id,
+        location_id=location_id,
+        zone_id=zone_id,
+        label=label,
+        source=dest_path.as_posix(),
+        is_active=False,
+        created_at=datetime.utcnow(),
+    )
+    db.add(cam); db.commit(); db.refresh(cam)
+    duration_s = round(frame_count / native_fps, 1) if native_fps > 0 else None
+    logger.info("camera.upload",
+                message=f"'{token.username}' uploaded {written / 1e6:.1f} MB video as {cam_id} "
+                        f"({duration_s or '?'} s, {native_fps:.0f} fps)")
+    return {
+        "id":          cam.id,
+        "location_id": cam.location_id,
+        "zone_id":     cam.zone_id,
+        "label":       cam.label,
+        "source":      cam.source,
+        "is_active":   False,
+        "is_file":     True,
+        "size_bytes":  written,
+        "fps":         round(native_fps, 1),
+        "frame_count": frame_count,
+        "duration_seconds": duration_s,
     }
 
 
@@ -562,15 +728,28 @@ def camera_start(
 
     camera_id = payload.camera_id
 
-    # Already running?
-    if camera_id in active_streams:
-        return {"status": "already_running", "camera_id": camera_id}
+    # Already running? (a finished video may be restarted — replays from 0)
+    existing = active_streams.get(camera_id)
+    if existing is not None:
+        if not getattr(existing, "_finished", False):
+            return {"status": "already_running", "camera_id": camera_id}
+        active_streams.pop(camera_id, None)
 
     if len(active_streams) >= MAX_STREAMS:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Max {MAX_STREAMS} simultaneous streams already active.",
-        )
+        # Finished video streams only hold their "VIDEO ENDED" frame — evict
+        # them before refusing a new stream
+        for cid, s in list(active_streams.items()):
+            if getattr(s, "_finished", False):
+                try:
+                    s.stop()
+                except Exception:
+                    pass
+                active_streams.pop(cid, None)
+        if len(active_streams) >= MAX_STREAMS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Max {MAX_STREAMS} simultaneous streams already active.",
+            )
 
     # Look up Camera record
     cam = db.query(CameraModel).filter(CameraModel.id == camera_id).first()
@@ -675,11 +854,21 @@ def camera_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
         is_running = stream is not None
         fps        = 0.0
         persons    = 0
+        is_file    = False
+        finished   = False
+        progress   = 0.0
+        analyzed   = 0
+        frame_persons = 0
         if stream:
             try:
-                st      = stream.get_status()
-                fps     = st.get("fps", 0.0)
-                persons = st.get("persons_detected_today", 0)
+                st       = stream.get_status()
+                fps      = st.get("fps", 0.0)
+                persons  = st.get("persons_detected_today", 0)
+                is_file  = st.get("is_file", False)
+                finished = st.get("finished", False)
+                progress = st.get("progress", 0.0)
+                analyzed = st.get("analyzed_frames", 0)
+                frame_persons = st.get("frame_persons", 0)
             except Exception:
                 pass
 
@@ -691,9 +880,14 @@ def camera_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
             "location_name":         loc.name if loc else c.location_id,
             "zone_id":               c.zone_id,
             "source":                c.source,
-            "is_active":             is_running,
+            "is_active":             is_running and not finished,
             "fps":                   fps,
             "persons_detected_today": persons,
+            "is_file":               is_file,
+            "finished":              finished,
+            "progress":              progress,
+            "analyzed_frames":       analyzed,
+            "frame_persons":         frame_persons,
         })
 
     active_count = len(active_streams)

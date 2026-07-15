@@ -127,6 +127,14 @@ class LiveStream:
         self.camera_id   = camera_id
         self._interval   = 1.0 / max(target_fps, 1)
 
+        # ── File-source mode (uploaded surveillance video) ──────────────
+        # Detected in start(); files play at native FPS and finish at EOF
+        # instead of retrying like a dropped live connection.
+        self._is_file      = isinstance(source, str) and Path(source).is_file()
+        self._finished     = False
+        self._frame_total  = 0   # CAP_PROP_FRAME_COUNT for files (0 = unknown)
+        self._face_scan_size = (640, 480)  # raised for high-res files in start()
+
         self._cap: Optional[cv2.VideoCapture] = None
         self._thread:  Optional[threading.Thread] = None
         self._worker:  Optional[threading.Thread] = None
@@ -160,6 +168,7 @@ class LiveStream:
         self._fps_value     = 0.0
         self._analysis_fps  = 0.0   # analysis cycles per second
         self._total_frames  = 0
+        self._analyzed_frames = 0   # frames the ML worker fully processed
 
         # ── Frame-level counters (updated per analysis cycle) ──────────
         self._frame_persons = 0
@@ -199,19 +208,39 @@ class LiveStream:
     # ── Public interface ─────────────────────────────────────────────────────
 
     def start(self) -> None:
-        """Open the camera and start the capture + analysis threads."""
+        """Open the camera/video and start the capture + analysis threads."""
         if isinstance(self.source, int):
             self._cap = cv2.VideoCapture(self.source, cv2.CAP_DSHOW)
         else:
             self._cap = cv2.VideoCapture(self.source)
         if not self._cap.isOpened():
             raise RuntimeError(f"Cannot open camera source: {self.source}")
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self._cap.set(cv2.CAP_PROP_FPS, 30)
-        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        # MJPG codec: USB webcams deliver 30 fps MJPG vs ~8 fps uncompressed YUY2
-        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
+
+        if self._is_file:
+            # Uploaded video: play at its recorded speed; webcam props don't apply
+            native_fps = self._cap.get(cv2.CAP_PROP_FPS) or 0
+            if not (1 <= native_fps <= 120):
+                native_fps = 25.0
+            self._interval    = 1.0 / native_fps
+            self._frame_total = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            # Resolution-aware detection: a 4K frame squeezed to YOLO's 416px
+            # webcam default loses every distant pedestrian (measured: 2 vs 5)
+            src_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            src_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            if self._detector is not None and src_w and src_h:
+                try:
+                    self._detector.set_imgsz_for_resolution(src_w, src_h)
+                except Exception:
+                    pass
+            # Face scan resolution follows the source too (see _analyze_frame)
+            self._face_scan_size = (1280, 720) if max(src_w, src_h) > 1280 else (640, 480)
+        else:
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self._cap.set(cv2.CAP_PROP_FPS, 30)
+            self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # MJPG codec: USB webcams deliver 30 fps MJPG vs ~8 fps uncompressed YUY2
+            self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter.fourcc('M', 'J', 'P', 'G'))
         if self._detector is not None:
             try:
                 self._detector.load_model()
@@ -247,6 +276,9 @@ class LiveStream:
         return self._running and self._cap is not None and self._cap.isOpened()
 
     def get_status(self) -> Dict:
+        progress = 0.0
+        if self._is_file and self._frame_total > 0:
+            progress = min(1.0, self._total_frames / self._frame_total)
         return {
             "connected":             self.is_connected(),
             "camera_id":             self.camera_id,
@@ -254,7 +286,15 @@ class LiveStream:
             "analysis_fps":          round(self._analysis_fps, 1),
             "persons_detected_today": self.persons_today,
             "active_tracks":         len(self.active_tracks),
+            # raw YOLO person count from the LAST analysis cycle — active_tracks
+            # only counts CONFIRMED identities, this shows detection is firing
+            # even before any face/registration gate passes
+            "frame_persons":         self._frame_persons,
             "zone_count":            self.zone_count,
+            "is_file":               self._is_file,
+            "finished":              self._finished,
+            "progress":              round(progress, 3),
+            "analyzed_frames":       self._analyzed_frames,
         }
 
     def get_mjpeg_frame(self) -> bytes:
@@ -282,6 +322,10 @@ class LiveStream:
             t0 = time.time()
             ret, frame = self._cap.read()
             if not ret:
+                if self._is_file:
+                    # End of uploaded video — finish cleanly, don't retry
+                    self._on_video_finished()
+                    break
                 logger.warning("LiveStream %s: frame read failed — retrying", self.camera_id)
                 time.sleep(0.5)
                 continue
@@ -315,6 +359,40 @@ class LiveStream:
             sleep_for = max(0, self._interval - elapsed)
             time.sleep(sleep_for)
 
+    def _on_video_finished(self) -> None:
+        """Uploaded video reached EOF: final frame, DB offline, stop threads."""
+        self._finished = True
+        persons_found = len({c["code"] for c in self._track_codes.values()}) or self.persons_today
+
+        # Final "VIDEO ENDED" frame stays visible in the MJPEG stream
+        end_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        cv2.putText(end_frame, "VIDEO ENDED", (170, 210), _FONT, 1.3, _WHITE, 2)
+        cv2.putText(end_frame, f"{persons_found} person(s) identified | {self._analyzed_frames} frames analysed",
+                    (95, 260), _FONT, 0.55, _GREY, 1)
+        cv2.putText(end_frame, f"{self.camera_id} — processing complete", (170, 300), _FONT, 0.5, _GREY, 1)
+        with self._lock:
+            self._latest_frame = self._encode_frame(end_frame)
+
+        # Mark the camera offline in the DB (user chose: finish = offline)
+        try:
+            db = SessionLocal()
+            try:
+                from database.models import Camera
+                cam = db.query(Camera).filter(Camera.id == self.camera_id).first()
+                if cam is not None:
+                    cam.is_active = False
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.debug("video-finished DB update failed: %s", exc)
+
+        self._running = False
+        if self._cap:
+            self._cap.release()
+        logger.info("LiveStream %s: video finished — %d person(s), %d frames analysed",
+                    self.camera_id, persons_found, self._analyzed_frames)
+
     # ─────────────────────────────────────────────────────────────────────────
     # Analysis worker — YOLO + ByteTrack + identify + sightings (own pace)
     # ─────────────────────────────────────────────────────────────────────────
@@ -329,6 +407,7 @@ class LiveStream:
             t0 = time.time()
             try:
                 self._analyze_frame(frame)
+                self._analyzed_frames += 1
             except Exception as exc:
                 logger.debug("LiveStream analysis error: %s", exc)
             cycle_times.append(time.time() - t0)
@@ -411,11 +490,12 @@ class LiveStream:
         all_faces: list = []
         if self._face_rec:
             try:
-                small_frame = cv2.resize(frame, (640, 480))
+                scan_w, scan_h = self._face_scan_size
+                small_frame = cv2.resize(frame, (scan_w, scan_h))
                 self._face_rec.extract_embedding(small_frame)
                 raw_faces = getattr(self._face_rec, "_last_faces", []) or []
-                h_scale = fh / 480
-                w_scale = fw / 640
+                h_scale = fh / scan_h
+                w_scale = fw / scan_w
                 for face_obj in raw_faces:
                     face_obj.bbox[0] *= w_scale
                     face_obj.bbox[1] *= h_scale
@@ -669,6 +749,21 @@ class LiveStream:
         annotated = frame  # draw in place; capture loop owns this frame
         fh, fw = frame.shape[:2]
 
+        # Box/text sizes below were tuned for a ~640x480 webcam frame. A 4K
+        # upload is 6x wider — fixed 2px strokes and 0.5 font scale become
+        # nearly invisible at that resolution, making working detection look
+        # like nothing is happening. Scale everything to the actual frame size.
+        s = max(fw, fh) / 640.0
+        thick      = max(2, round(2 * s))
+        thick_fill = max(2, round(3 * s))
+        font_lg    = 0.50 * s
+        font_md    = 0.45 * s
+        font_sm    = 0.35 * s
+        font_xs    = 0.32 * s
+        pad        = round(6 * s)
+        sq_size    = round(14 * s)
+        kp_radius  = max(2, round(3 * s))
+
         with self._results_lock:
             results = self._latest_results
         persons = results["persons"]
@@ -679,10 +774,10 @@ class LiveStream:
             ox, oy, ow, oh = obj["bbox"]
             color = _ORANGE if obj["is_bag"] else _YELLOW
             label = obj["label"]
-            cv2.rectangle(annotated, (ox, oy), (ox + ow, oy + oh), color, 2)
-            (tw, th), _ = cv2.getTextSize(label, _FONT, 0.45, 1)
-            cv2.rectangle(annotated, (ox, oy - th - 6), (ox + tw + 4, oy), color, -1)
-            cv2.putText(annotated, label, (ox + 2, oy - 3), _FONT, 0.45, _BLACK, 1)
+            cv2.rectangle(annotated, (ox, oy), (ox + ow, oy + oh), color, thick)
+            (tw, th), _ = cv2.getTextSize(label, _FONT, font_md, 1)
+            cv2.rectangle(annotated, (ox, oy - th - pad), (ox + tw + pad, oy), color, -1)
+            cv2.putText(annotated, label, (ox + 2, oy - 3), _FONT, font_md, _BLACK, 1)
 
         # ── Movement trails ───────────────────────────────────────────────
         for p in persons:
@@ -690,7 +785,7 @@ class LiveStream:
             trail = self._track_trails.get(tid) if tid is not None else None
             if trail and len(trail) >= 2:
                 pts = np.array(trail, dtype=np.int32).reshape(-1, 1, 2)
-                cv2.polylines(annotated, [pts], False, _BOX_COLORS.get(p["method"], _GREY), 2)
+                cv2.polylines(annotated, [pts], False, _BOX_COLORS.get(p["method"], _GREY), thick)
 
         # ── Person boxes + labels ─────────────────────────────────────────
         for p in persons:
@@ -699,13 +794,13 @@ class LiveStream:
             code, method, conf = p["code"], p["method"], p["conf"]
             color = _BOX_COLORS.get(method, _GREY if method == "pending" else _WHITE)
 
-            cv2.rectangle(annotated, (x, y), (x2, y2), color, 2)
+            cv2.rectangle(annotated, (x, y), (x2, y2), color, thick_fill)
 
             # Face box + landmarks
             if p["face_bbox"]:
                 fx1, fy1, fx2, fy2 = p["face_bbox"]
-                cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), _CYAN, 2)
-                cv2.putText(annotated, "Face", (fx1, fy1 - 8), _FONT, 0.5, _CYAN, 1)
+                cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), _CYAN, thick)
+                cv2.putText(annotated, "Face", (fx1, int(fy1 - 8 * s)), _FONT, font_lg, _CYAN, 1)
                 if p["face_kps"]:
                     landmark_colors = [
                         (255, 0,   0),    # left eye
@@ -715,22 +810,21 @@ class LiveStream:
                         (0,   255, 255),  # right mouth
                     ]
                     for i, kp in enumerate(p["face_kps"][:5]):
-                        cv2.circle(annotated, (int(kp[0]), int(kp[1])), 3, landmark_colors[i], -1)
+                        cv2.circle(annotated, (int(kp[0]), int(kp[1])), kp_radius, landmark_colors[i], -1)
 
             # Dress colour square + hex
             if p["color_hex"]:
                 try:
                     hexv = p["color_hex"].lstrip("#")
                     r, g_c, b = int(hexv[0:2], 16), int(hexv[2:4], 16), int(hexv[4:6], 16)
-                    sq_size = 14
                     sq_x, sq_y = x + 3, y2 - sq_size - 3
                     cv2.rectangle(annotated, (sq_x, sq_y),
                                   (sq_x + sq_size, sq_y + sq_size), (b, g_c, r), -1)
                     cv2.rectangle(annotated, (sq_x, sq_y),
-                                  (sq_x + sq_size, sq_y + sq_size), _WHITE, 1)
+                                  (sq_x + sq_size, sq_y + sq_size), _WHITE, thick)
                     cv2.putText(annotated, p["color_hex"],
                                 (sq_x + sq_size + 3, sq_y + sq_size - 2),
-                                _FONT, 0.32, _WHITE, 1)
+                                _FONT, font_xs, _WHITE, 1)
                 except Exception:
                     pass
 
@@ -738,9 +832,9 @@ class LiveStream:
             id_text = p.get("label") or code
             if p["gender"]:
                 id_text += f" {p['gender']}"
-            (tw, th_t), _ = cv2.getTextSize(id_text, _FONT, 0.50, 2)
-            cv2.rectangle(annotated, (x, y - th_t - 8), (x + tw + 6, y), color, -1)
-            cv2.putText(annotated, id_text, (x + 3, y - 4), _FONT, 0.50, _BLACK, 2)
+            (tw, th_t), _ = cv2.getTextSize(id_text, _FONT, font_lg, thick)
+            cv2.rectangle(annotated, (x, y - th_t - pad - 2), (x + tw + pad, y), color, -1)
+            cv2.putText(annotated, id_text, (x + 3, y - 4), _FONT, font_lg, _BLACK, thick)
 
             # Method + confidence below box
             method_short = {
@@ -749,15 +843,15 @@ class LiveStream:
                 "new_registration": "New", "pending": "..."
             }.get(method, method)
             cv2.putText(annotated, f"{method_short} {int(conf * 100)}%",
-                        (x, y2 + 14), _FONT, 0.38, color, 1)
+                        (x, int(y2 + 14 * s)), _FONT, font_sm, color, thick)
 
             # Height label on right side of box
             cv2.putText(annotated, p["height_label"],
-                        (x2 - 55, y2 - 5), _FONT, 0.35, _WHITE, 1)
+                        (int(x2 - 55 * s), y2 - 5), _FONT, font_sm, _WHITE, thick)
 
             if p["carrying"]:
                 cv2.putText(annotated, f"carrying {p['carrying']}",
-                            (x, y2 + 28), _FONT, 0.35, _ORANGE, 1)
+                            (x, int(y2 + 28 * s)), _FONT, font_sm, _ORANGE, thick)
 
         # ── HUD overlay ───────────────────────────────────────────────────
         self._draw_hud(annotated, fh, fw)
@@ -770,26 +864,27 @@ class LiveStream:
     def _draw_hud(self, annotated: np.ndarray, fh: int, fw: int) -> None:
         """Draw on-screen stats overlay."""
         fps = self._fps_value
+        s = max(fw, fh) / 640.0  # see _annotate_frame — same webcam-tuned baseline
 
         # ── Top-left: camera info ─────────────────────────────────────────
         hud_top = f"SmartDetect | {self.camera_id} | LIVE"
-        (hw, hh), _ = cv2.getTextSize(hud_top, _FONT, 0.55, 2)
-        cv2.rectangle(annotated, (0, 0), (hw + 14, hh + 12), (0, 0, 0), -1)
-        cv2.putText(annotated, hud_top, (7, hh + 5), _FONT, 0.55, _WHITE, 1)
+        (hw, hh), _ = cv2.getTextSize(hud_top, _FONT, 0.55 * s, max(1, round(2 * s)))
+        cv2.rectangle(annotated, (0, 0), (hw + round(14 * s), hh + round(12 * s)), (0, 0, 0), -1)
+        cv2.putText(annotated, hud_top, (round(7 * s), hh + round(5 * s)), _FONT, 0.55 * s, _WHITE, max(1, round(s)))
 
         # ── Bottom-left: stats ────────────────────────────────────────────
         stats = (f"Persons: {self._frame_persons} | Faces: {self._frame_faces} | "
                  f"Bags: {self._frame_bags} | FPS: {fps:.0f} | ML: {self._analysis_fps:.1f}/s")
-        (sw, sh), _ = cv2.getTextSize(stats, _FONT, 0.45, 1)
-        by = fh - 10
-        cv2.rectangle(annotated, (0, by - sh - 8), (sw + 14, fh), (0, 0, 0), -1)
-        cv2.putText(annotated, stats, (7, by - 2), _FONT, 0.45, _WHITE, 1)
+        (sw, sh), _ = cv2.getTextSize(stats, _FONT, 0.45 * s, max(1, round(s)))
+        by = fh - round(10 * s)
+        cv2.rectangle(annotated, (0, by - sh - round(8 * s)), (sw + round(14 * s), fh), (0, 0, 0), -1)
+        cv2.putText(annotated, stats, (round(7 * s), by - 2), _FONT, 0.45 * s, _WHITE, max(1, round(s)))
 
         # ── Bottom-right: timestamp ───────────────────────────────────────
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        (tsw, tsh), _ = cv2.getTextSize(ts, _FONT, 0.42, 1)
-        cv2.rectangle(annotated, (fw - tsw - 14, fh - tsh - 12), (fw, fh), (0, 0, 0), -1)
-        cv2.putText(annotated, ts, (fw - tsw - 7, fh - 6), _FONT, 0.42, _GREY, 1)
+        (tsw, tsh), _ = cv2.getTextSize(ts, _FONT, 0.42 * s, max(1, round(s)))
+        cv2.rectangle(annotated, (fw - tsw - round(14 * s), fh - tsh - round(12 * s)), (fw, fh), (0, 0, 0), -1)
+        cv2.putText(annotated, ts, (fw - tsw - round(7 * s), fh - round(6 * s)), _FONT, 0.42 * s, _GREY, max(1, round(s)))
 
         # ── Colour legend (top-right) ─────────────────────────────────────
         legend_items = [
@@ -798,12 +893,14 @@ class LiveStream:
             (_WHITE,  "New"),
             (_ORANGE, "Bag/Obj"),
         ]
-        lx = fw - 100
-        ly = 8
+        lx = fw - round(100 * s)
+        ly = round(8 * s)
+        box = round(10 * s)
+        step = round(16 * s)
         for lcolor, ltext in legend_items:
-            cv2.rectangle(annotated, (lx, ly), (lx + 10, ly + 10), lcolor, -1)
-            cv2.putText(annotated, ltext, (lx + 14, ly + 9), _FONT, 0.33, _WHITE, 1)
-            ly += 16
+            cv2.rectangle(annotated, (lx, ly), (lx + box, ly + box), lcolor, -1)
+            cv2.putText(annotated, ltext, (lx + box + round(4 * s), ly + box - 1), _FONT, 0.33 * s, _WHITE, max(1, round(s)))
+            ly += step
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers

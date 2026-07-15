@@ -23,16 +23,25 @@ function StatCard({ id, label, value, sub, subColor = '#22c55e', loading }) {
 function LiveFeedPreview() {
   const [status, setStatus] = useState(null)
   useEffect(() => {
-    axios.get(`${API}/camera/status`).then(r => setStatus(r.data)).catch(() => {})
+    const fetch = () => axios.get(`${API}/camera/status`).then(r => setStatus(r.data)).catch(() => {})
+    fetch()
+    const iv = setInterval(fetch, 5000)
+    return () => clearInterval(iv)
   }, [])
 
-  const isConnected = status?.connected === true
-  const streamUrl = `${API}/camera/stream/${status?.camera_id || 'CAM-001'}`
+  const cameras = status?.cameras || []
+  // Multiple cameras can run at once (webcam + uploaded videos) — prefer
+  // whichever is actually active right now, not just the first one ever seen
+  const preview = cameras.find(c => c.is_active) || cameras[0]
+  const isConnected = !!preview?.is_active
+  const streamUrl = `${API}/camera/stream/${preview?.camera_id || 'CAM-001'}`
 
   return (
     <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
       <div style={{ padding: '12px 14px', borderBottom: '0.5px solid #f0f0f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 13, fontWeight: 500 }}>Live Feed</span>
+        <span style={{ fontSize: 13, fontWeight: 500 }}>
+          Live Feed{preview ? ` — ${preview.label || preview.camera_id}` : ''}
+        </span>
         {isConnected
           ? <span className="badge badge-green"><span className="dot dot-green pulse" style={{ width: 5, height: 5 }} />LIVE</span>
           : <span className="badge badge-gray">Offline</span>
@@ -42,6 +51,7 @@ function LiveFeedPreview() {
         <div className="camera-grid-lines" />
         {isConnected ? (
           <img
+            key={streamUrl}
             src={streamUrl} alt="Live camera"
             style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             onError={e => { e.target.style.display = 'none' }}

@@ -4,7 +4,7 @@
 
 **AI-powered real-time person tracking and re-identification for any camera-equipped environment**
 
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi)](https://fastapi.tiangolo.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react)](https://react.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -14,198 +14,106 @@
 
 ## Overview
 
-**SmartDetect** is a production-grade AI surveillance platform that works in any camera-equipped environment — offices, campuses, warehouses, retail stores, transit hubs, parking structures, and more. It uses deep learning to automatically detect, register, and track individuals across multiple camera feeds in real time — assigning each person a unique tracking code and building a chronological movement trail as they move through monitored zones.
+**SmartDetect** detects, registers, and tracks individuals across camera feeds — live webcams, RTSP cameras, or **uploaded surveillance video files** — assigning each person a persistent `SDT-XXXX` code and building a chronological movement trail with photo evidence.
 
-The system combines **InsightFace** ArcFace embeddings for face recognition with **OSNet** person re-identification as a fallback when faces are obscured, and uses **DeepSORT** for stable multi-object tracking across video frames. A **FastAPI** backend stores all data in PostgreSQL with `pgvector` for fast similarity search, while a **React** dashboard gives operators an intuitive interface to search persons and view movement trails in real time.
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    React Dashboard                       │
-│         (Vite + Tailwind · http://localhost:5173)        │
-└─────────────────────┬───────────────────────────────────┘
-                      │ REST API (JWT Bearer)
-┌─────────────────────▼───────────────────────────────────┐
-│                   FastAPI Backend                        │
-│  /auth/login  /register  /sighting  /person/trail        │
-│  /locations   /logs      /health                         │
-└──────┬──────────────┬────────────────────┬──────────────┘
-       │              │                    │
-┌──────▼──────┐ ┌─────▼──────┐  ┌─────────▼────────────┐
-│  PostgreSQL │ │ InsightFace│  │  Camera Processors    │
-│  pgvector   │ │  buffalo_l │  │  (DeepSORT + Re-ID)   │
-│  (SQLite in │ │  OSNet     │  │  Auto-reconnect logic  │
-│   dev mode) │ └────────────┘  └──────────────────────┘
-└─────────────┘
-```
-
-**Key components:**
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| Face Recognition | InsightFace / buffalo_l | 512-dim ArcFace embeddings |
-| Person Re-ID | torchreid / OSNet-x1.0 | Appearance features (face fallback) |
-| Object Tracking | DeepSORT (deep-sort-realtime) | Stable IDs across frames |
-| Backend API | FastAPI + Uvicorn | REST endpoints, JWT auth |
-| Database | PostgreSQL + pgvector | Embeddings + sighting storage |
-| Dev Database | SQLite | Zero-config local development |
-| Frontend | React 18 + Vite + Tailwind | Operator dashboard |
-| Containerisation | Docker Compose | One-command full-stack startup |
+Pipeline: **YOLOv8** person detection → **ByteTrack** multi-object tracking → **InsightFace** ArcFace face recognition (identity anchor) → **OSNet** body re-identification (when the face isn't visible) → adaptive multi-template face gallery that improves recognition with every visit.
 
 ---
 
-## Quick Start — Docker (Recommended)
+## Project Status & AI Handoff (updated 2026-07-15)
 
-> **Requirements:** Docker Desktop 4.x+, Docker Compose v2
+> This section exists so that a developer — or an AI assistant — on a **new machine** can pick up exactly where the project left off. Read it before touching anything.
 
-```bash
-# 1. Clone the repository
-git clone https://github.com/your-org/smartdetect.git
-cd smartdetect
+### What is built and verified working
 
-# 2. Start all services (Postgres + Backend + Frontend)
-docker compose up
+| Feature | State |
+|---|---|
+| Live webcam detection/tracking/identity (CAM auto-start) | ✅ verified live |
+| **Video file upload → full analysis pipeline** (`POST /cameras/upload`, multipart, validated) | ✅ verified live |
+| Uploaded video plays at native FPS; **EOF → "VIDEO ENDED" frame + camera marked offline** | ✅ verified live |
+| Resolution-aware detection (4K→960px, HD→640px, webcam→416px YOLO input) | ✅ verified: **2→5 people found** on the same 4K frame |
+| Resolution-scaled overlay drawing (boxes/labels/HUD scale with source size) | ✅ verified on 4K |
+| Face-anchored identity: no face → no SDT code; strict 0.50 ArcFace threshold; face veto on colour/re-ID matches; one code per visible scene | ✅ verified with 2 people |
+| Adaptive face memory: 80/20 template blending + multi-view gallery (`face_templates`, cap 5) | ✅ |
+| Snapshot evidence: registration photo + per-sighting crops under `snapshots/{code}/`, served at `/snapshots` | ✅ verified |
+| Named enrollment: `PUT /persons/{code}`, People dashboard page (photos, rename, type, appearance gallery) | ✅ verified |
+| Photo search → clickable SDT code → person's appearance frames | ✅ |
+| Real OSNet re-ID (vendored arch + downloaded weights — see gotchas) | ✅ `is_stub=False`, 512-dim features |
+| Progress/`frame_persons`/`analyzed_frames` diagnostics in `/camera/status` | ✅ |
 
-# 3. Dashboard will be available at:
-#    http://localhost:5173    ← React dashboard
-#    http://localhost:8000/docs ← Swagger API docs
+### Known open items (deliberately deferred)
 
-# 4. (Optional) Load demo data
-docker compose exec backend python scripts/demo_setup.py --days 3
-```
+1. **Box lag on high-res uploads**: video plays real-time (30fps) but 4K analysis takes ~5s/frame on the dev laptop's CPU, so overlay boxes trail moving people by seconds. Decision deferred — owner is moving to a stronger CPU. Options designed: analysis-paced "thorough mode" playback, or per-upload toggle.
+2. **Label overlap**: when two people walk close together their "Detecting..." labels overlap. Cosmetic.
+3. **Coach checkpoints pending**: Security review of the upload endpoint (validation exists: extension whitelist, 500MB cap, content sniff via cv2, server-generated filenames, operator JWT — but the formal findings review hasn't run) and end-to-end QA with a real clip.
+4. **Supabase (production DB) is paused/unreachable** — everything currently runs on local SQLite (`smartdetect.db`). Restore from the Supabase dashboard, then `scripts/supabase_migrate.py` pushes local data up. The pgvector query path (`database/queries.py`) is written but untested live.
+5. Distant people in wide street footage stay "Detecting..." (grey) forever **by design** — their faces are below the quality gate (48px height, 0.60 det-score) that prevents identity cross-contamination. Identity requires footage where people pass within ~5–10m of the camera.
 
-On first start, `docker/init.sql` automatically:
-- Enables the `pgvector` extension
-- Creates all tables
-- Seeds 8 demo locations
+### Environment gotchas (will bite you if unread)
 
----
+- **Python 3.14 venv** (`.venv/`). Two packages need care:
+  - `torchreid` has **no installable package** — PyPI's "torchreid" is an unrelated dead project and the real deep-person-reid doesn't build on 3.14. Solution in place: the OSNet architecture is **vendored** at `recognition/osnet_arch.py` (MIT) and re-ID-trained weights are fetched by `python scripts/fetch_osnet.py` → `models/osnet_x1_0_reid.pth` (~56MB, gitignored).
+  - `albumentations==1.4.15` / `albucore==0.0.16` are **pinned on purpose**: newer albucore pulls a native `stringzilla` DLL that Windows Application Control blocks, which silently kills `insightface` (symptom: "insightface not installed" when it is). Don't upgrade them.
+- **The dev machine's HTTPS is intercepted** (AV/proxy): plain `requests`/`urllib` fail with `CERTIFICATE_VERIFY_FAILED`. `pip` and `git` work. For other downloads inject `truststore` first (`import truststore; truststore.inject_into_ssl()`) — `scripts/fetch_osnet.py` shows the pattern. On a normal machine, ultralytics auto-downloads `yolov8n.pt` on first run and InsightFace fetches buffalo_l into `~/.insightface`; on an SSL-intercepted machine, copy `yolov8n.pt` and `~/.insightface/models/buffalo_l/` over from the old machine (both are gitignored).
+- **Backend must run with cwd = project root.** `uploads/`, `snapshots/`, and `sqlite:///./smartdetect.db` are all cwd-relative. A stray `cd` once rooted everything inside `dashboard/` and looked like data loss. Start it exactly like this:
+  ```powershell
+  Set-Location "<project root>"
+  $env:DATABASE_URL = "sqlite:///./smartdetect.db"
+  .venv\Scripts\python.exe -m uvicorn backend.main:app --port 8000
+  ```
+- `SMARTDETECT_NO_AUTOSTART=1` skips the CAM-001 auto-start (useful for API tests without grabbing a camera).
+- The dev laptop's webcam hardware caps at **15 FPS** @ 640×480 — don't chase 30.
+- Default credentials (`admin/smartAdmin2024`, `operator/smartOp2024`) and the JWT secret are development defaults hardcoded as fallbacks — **override via env vars before any real deployment** (`ADMIN_PASSWORD`, `OPERATOR_PASSWORD`, `JWT_SECRET`). The dashboard auto-logins with the operator default (see `dashboard/src/pages/Alerts.jsx` pattern).
 
-## Local Development (No Docker)
+### Architecture decisions already made (don't re-litigate)
 
-### Prerequisites
-- Python 3.10+
-- Node.js 18+
-
-### Backend setup
-
-```bash
-# Install Python dependencies
-pip install fastapi uvicorn sqlalchemy python-dotenv pydantic \
-            opencv-python numpy requests python-multipart deep-sort-realtime \
-            pyjwt
-
-# Optional ML packages (for full accuracy)
-pip install insightface onnxruntime      # face recognition
-pip install torch torchvision torchreid  # person re-identification
-
-# Configure environment (SQLite by default)
-cp .env.example .env   # Edit DATABASE_URL if using PostgreSQL
-
-# Start backend
-python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### Frontend setup
-
-```bash
-cd dashboard
-npm install
-npm run dev
-# Opens at http://localhost:5173
-```
-
-### Seed demo data
-
-```bash
-# Seed 8 locations
-python scripts/seed_stations.py
-
-# Seed 10 demo persons with 3 days of movement history
-python scripts/demo_setup.py --days 3
-```
+- Capture and ML run on **separate threads** per camera (drop-oldest queue, `cameras/live_stream.py`) — this is what keeps stream FPS independent of analysis cost.
+- **ByteTrack** (via `supervision`, pinned `<0.30`) replaced DeepSORT — identity resolution runs **once per track**, not per frame.
+- Identity is **face-anchored**: clothing colour and body re-ID can only *re-associate* someone recently seen (10 min / 12 h windows), never mint or steal an identity; both are face-vetoed. Re-ID templates refresh to today's clothing on every face-confirmed match.
+- Uploaded videos are **cameras with a file source** — same Camera row, same `/camera/start`, same stream endpoint. EOF is detected only for file sources (webcams keep retrying).
 
 ---
 
-## Running the Demo
+## Quick Start (local, no Docker)
 
-After starting the system (Docker or local):
-
-1. Open **http://localhost:5173**
-2. Click **"Register Person"** → upload a face photo → select entry location
-3. Copy the assigned `SDT-XXXX` code
-4. Click **"Person Trail"** → paste the code → view the movement timeline
-
-To see a pre-populated dashboard with realistic data:
 ```bash
-python scripts/demo_setup.py --days 3
+# Backend (Python 3.10+; dev machine uses 3.14 — see gotchas above)
+pip install -r requirements.txt
+python scripts/fetch_osnet.py          # one-time: body re-ID weights
+$env:DATABASE_URL = "sqlite:///./smartdetect.db"   # PowerShell
+python -m uvicorn backend.main:app --port 8000
+
+# Frontend
+cd dashboard && npm install && npm run dev   # http://localhost:5173
 ```
-Then search for any code like `SDT-0001` through `SDT-0010`.
+
+Docker route (`docker compose up`) exists but the compose file predates the video-upload feature — local run is the tested path right now.
+
+### Try the core flows
+
+1. **Live camera**: the default webcam auto-starts as CAM-001 (unless its DB row points elsewhere). Stand in frame → grey "Detecting..." → green `SDT-0001` within ~3 s.
+2. **Upload a surveillance video**: Live Camera page → ＋ Add Camera → source "Upload Video File" → pick an `.mp4` (≤500 MB) → Start. Watch annotated playback; card shows PROCESSING %, then FINISHED and the camera goes offline.
+3. **Name someone**: People page → pencil icon → type a name → the live label becomes `Name (SDT-XXXX)`.
+4. **Find someone from a photo**: Photo Search → upload a face → click the matched code → their captured frames.
 
 ---
 
-## API Documentation
+## API Highlights
 
-Full interactive docs at: **http://localhost:8000/docs**
-
-### Authentication
-
-All protected routes require a **JWT Bearer token**.
-
-```bash
-# Get a token
-curl -X POST http://localhost:8000/auth/login \
-     -H "Content-Type: application/json" \
-     -d '{"username": "operator", "password": "smartOp2024"}'
-
-# Use the token
-curl http://localhost:8000/locations \
-     -H "Authorization: Bearer <token>"
-```
-
-**Default credentials:**
-
-| Username | Password | Role |
-|---|---|---|
-| `admin` | `smartAdmin2024` | Full access |
-| `operator` | `smartOp2024` | Search & view |
-
-### Endpoints
+Interactive docs: **http://localhost:8000/docs** — all protected routes take `Authorization: Bearer <token>` from `POST /auth/login`.
 
 | Method | Path | Role | Description |
 |---|---|---|---|
-| `POST` | `/auth/login` | Public | Obtain JWT token |
-| `GET` | `/health` | Public | Service health check |
-| `POST` | `/register` | operator+ | Register person from base64 image |
-| `GET` | `/person/{code}/trail` | operator+ | Get movement trail |
-| `POST` | `/sighting` | operator+ | Log a camera sighting |
-| `GET` | `/locations` | operator+ | List all locations |
-| `POST` | `/locations` | admin | Create a new location |
-| `GET` | `/watchlist` | operator+ | View watchlist entries |
-| `GET` | `/alerts` | operator+ | View alerts |
-| `GET` | `/settings` | operator+ | View system settings |
-| `GET` | `/logs?lines=100` | admin | Fetch recent system logs |
-
----
-
-## Testing
-
-```bash
-# End-to-end integration test
-python scripts/e2e_test.py
-
-# New features test suite (rate limiting, settings, watchlist, alerts)
-python scripts/test_new_features.py
-
-# Load test (50 concurrent users, 60 seconds)
-python scripts/load_test.py --standalone --users 50 --duration 60s
-
-# Accuracy evaluation (100 probe images)
-python scripts/accuracy_test.py --images 100 --persons 10
-```
+| `POST` | `/cameras/upload` | operator+ | **Multipart video upload → creates a file-source camera** (ext whitelist, 500 MB cap, content-sniffed) |
+| `POST` | `/camera/start` / `/camera/stop` | operator+ | Start/stop any camera (webcam index, RTSP URL, or uploaded file) |
+| `GET` | `/camera/status` | public | Per-camera fps, `progress`, `finished`, `frame_persons`, `analyzed_frames` |
+| `GET` | `/camera/stream/{id}` | public | Annotated MJPEG stream |
+| `GET` | `/persons` | public | All registered people (+ `display_name`, `photo_path`) |
+| `GET` | `/persons/{code}` | public | Person detail + appearance list (sighting snapshots) |
+| `PUT` | `/persons/{code}` | operator+ | Named enrollment: set `display_name` / `person_type` |
+| `POST` | `/search/by-photo` | operator+ | Face search from a base64 photo |
+| `GET` | `/person/{code}/trail` | operator+ | Movement trail |
+| `GET` | `/snapshots/...` | public (static) | Registration + sighting photos |
 
 ---
 
@@ -213,53 +121,34 @@ python scripts/accuracy_test.py --images 100 --persons 10
 
 | Category | Technology |
 |---|---|
-| **ML — Face Recognition** | InsightFace, ArcFace (buffalo_l), ONNX Runtime |
-| **ML — Person Re-ID** | torchreid, OSNet-x1.0, PyTorch |
-| **ML — Tracking** | DeepSORT (deep-sort-realtime) |
-| **ML — Detection** | OpenCV (placeholder: YOLO-ready) |
-| **Backend** | FastAPI, Uvicorn, Pydantic v2, SQLAlchemy |
-| **Auth** | PyJWT, Bearer tokens, RBAC (operator/admin) |
-| **Database** | PostgreSQL + pgvector (prod), SQLite (dev) |
-| **Logging** | Python logging, RotatingFileHandler, structured events |
-| **Frontend** | React 18, Vite 5, Tailwind CSS, Axios |
-| **Containerisation** | Docker Compose, multi-stage Dockerfile |
-| **Testing** | Custom E2E suite, Locust load test, accuracy evaluator |
+| Detection | **YOLOv8n** (ultralytics), resolution-aware input size |
+| Tracking | **ByteTrack** (supervision `>=0.26,<0.30`) |
+| Face Recognition | InsightFace buffalo_l (ArcFace 512-dim), multi-template gallery |
+| Body Re-ID | **OSNet x1.0** — vendored arch (`recognition/osnet_arch.py`) + model-zoo weights |
+| Backend | FastAPI, Uvicorn, SQLAlchemy, PyJWT (RBAC operator/admin) |
+| Database | SQLite (current) / PostgreSQL + pgvector (written, pending Supabase restore) |
+| Frontend | React 18, Vite, Axios |
 
 ---
 
 ## Project Structure
 
 ```
-smartdetect/
-├── backend/          # FastAPI app, auth, logger
-├── cameras/          # CameraProcessor with auto-reconnect
-├── database/         # SQLAlchemy models, queries, db setup
-├── docker/           # Dockerfiles + init.sql
-├── dashboard/        # React + Vite frontend
-├── models/           # Model cache directory
-├── recognition/      # FaceRecognizer, PersonReID, registration
-├── scripts/          # e2e_test, load_test, accuracy_test,
-│                     # demo_setup, seed_stations, test_new_features
-├── tracker/          # DeepSORT wrapper
-├── logs/             # Rotating system.log (auto-created)
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+smart detect/
+├── backend/            # FastAPI app (main.py), auth, logger
+├── cameras/            # live_stream.py — threaded capture+analysis per camera
+│                       # camera_processor.py — standalone debug-window variant
+├── database/           # models, queries (sqlite + pgvector paths), db setup
+├── dashboard/          # React frontend (pages: Dashboard, LiveCamera, People,
+│                       #   PhotoSearch, Locations, ObjectFeed, Alerts, Settings)
+├── recognition/        # face_recognizer, smart_identifier (identity rules),
+│                       #   reid_model + osnet_arch (vendored), object_detector
+├── scripts/            # fetch_osnet, supabase_migrate, e2e_test, demo_setup…
+├── models/             # osnet_x1_0_reid.pth (gitignored — run fetch_osnet.py)
+├── uploads/            # uploaded surveillance videos (gitignored)
+├── snapshots/          # per-person photo evidence (gitignored)
+└── requirements.txt    # read the ML section comments before upgrading anything
 ```
-
----
-
-## Use Cases
-
-SmartDetect can be deployed in any environment with camera coverage:
-
-- **Office buildings** — visitor tracking, access monitoring
-- **Retail stores** — customer flow analysis, loss prevention
-- **Campuses** — student and staff movement tracking
-- **Warehouses** — worker safety, zone compliance
-- **Transit hubs** — commuter flow, crowd management
-- **Parking structures** — vehicle + person tracking
-- **Event venues** — attendee monitoring, security alerts
 
 ---
 

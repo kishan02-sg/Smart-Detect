@@ -61,11 +61,33 @@ class ObjectDetector:
     Falls back gracefully to a stub when ultralytics is not installed.
     """
 
+    # Measured on a real 4K street clip (same frame): imgsz 416 → 2 persons,
+    # 640 → 4, 960 → 5, 1280 → 5. Bigger inputs keep distant pedestrians
+    # above YOLO's minimum object size; past 960 there is no further gain.
+    DEFAULT_IMGSZ = 416   # webcam baseline — cheap, low heat
+
     def __init__(self, model_name: str = "yolov8n.pt", confidence: float = 0.40):
         self._model_name = model_name
         self._conf       = confidence
         self._model      = None
         self._stub_mode  = False
+        self.imgsz       = self.DEFAULT_IMGSZ
+
+    def set_imgsz_for_resolution(self, frame_w: int, frame_h: int) -> None:
+        """
+        Pick the YOLO input size from the source resolution. High-res video
+        squeezed to 416px turns distant people into ~5px smudges YOLO cannot
+        see — scale the network input up with the source instead.
+        """
+        longest = max(frame_w, frame_h)
+        if longest > 2560:
+            self.imgsz = 960
+        elif longest > 1280:
+            self.imgsz = 640
+        else:
+            self.imgsz = self.DEFAULT_IMGSZ
+        logger.info("yolo.imgsz",
+                    message=f"Detection input size set to {self.imgsz} for {frame_w}x{frame_h} source")
 
     # ── Model loading ─────────────────────────────────────────────────────────
 
@@ -111,7 +133,7 @@ class ObjectDetector:
                 source=frame,
                 conf=0.30,        # low enough to catch more people
                 iou=0.45,
-                imgsz=416,        # higher = better boxes (background thread, no FPS impact)
+                imgsz=self.imgsz, # resolution-aware — see set_imgsz_for_resolution
                 classes=[0],      # person class only
                 verbose=False,
             )

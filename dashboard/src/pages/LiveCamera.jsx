@@ -11,8 +11,11 @@ const sourceLabel = src => {
   if (s === '2') return 'Webcam 2'
   if (s === '3') return 'Webcam 3'
   if (s.startsWith('rtsp')) return 'IP Camera'
+  if (s.startsWith('uploads/')) return 'Uploaded Video'
   return `Source ${s}`
 }
+
+const isFileSource = src => String(src).startsWith('uploads/')
 
 // ── ZonePill ──────────────────────────────────────────────────────────────────
 function ZonePill({ zone }) {
@@ -42,14 +45,42 @@ function AddCameraForm({ locationId, token, onCreated, onCancel }) {
   const [label,   setLabel]   = useState('')
   const [srcType, setSrcType] = useState('0')
   const [rtsp,    setRtsp]    = useState('')
+  const [file,    setFile]    = useState(null)
+  const [uploadPct, setUploadPct] = useState(null)   // null = not uploading
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState(null)
 
   const submit = async () => {
     if (!zone.trim() || !label.trim()) { setError('Zone and label are required.'); return }
+    setError(null)
+
+    // ── Video file upload → multipart POST /cameras/upload ──────────────
+    if (srcType === 'upload') {
+      if (!file) { setError('Choose a video file (.mp4, .avi, .mov, .mkv).'); return }
+      if (file.size > 500 * 1024 * 1024) { setError('Video exceeds the 500 MB limit.'); return }
+      setLoading(true); setUploadPct(0)
+      try {
+        const form = new FormData()
+        form.append('file', file)
+        form.append('location_id', locationId)
+        form.append('zone_id', zone.trim())
+        form.append('label', label.trim())
+        const { data } = await axios.post(`${API}/cameras/upload`, form, {
+          headers: { Authorization: `Bearer ${token}` },
+          onUploadProgress: ev => {
+            if (ev.total) setUploadPct(Math.round((ev.loaded / ev.total) * 100))
+          },
+        })
+        onCreated(data)
+      } catch (e) {
+        setError(e.response?.data?.detail || 'Upload failed.')
+      } finally { setLoading(false); setUploadPct(null) }
+      return
+    }
+
     const source = srcType === 'rtsp' ? rtsp.trim() : srcType
     if (srcType === 'rtsp' && !source) { setError('Enter an RTSP URL.'); return }
-    setLoading(true); setError(null)
+    setLoading(true)
     try {
       const { data } = await axios.post(`${API}/cameras`,
         { location_id: locationId, zone_id: zone.trim(), label: label.trim(), source },
@@ -81,18 +112,52 @@ function AddCameraForm({ locationId, token, onCreated, onCancel }) {
         value={label} onChange={e => setLabel(e.target.value)} />
 
       <select value={srcType} onChange={e => setSrcType(e.target.value)}
-        style={{ ...inputStyle, marginBottom: srcType === 'rtsp' ? 8 : 12 }}>
+        style={{ ...inputStyle, marginBottom: (srcType === 'rtsp' || srcType === 'upload') ? 8 : 12 }}>
         <option value="0">Webcam 0</option>
         <option value="1">Webcam 1</option>
         <option value="2">Webcam 2</option>
         <option value="3">Webcam 3</option>
         <option value="rtsp">IP Camera (RTSP)</option>
+        <option value="upload">Upload Video File</option>
       </select>
 
       {srcType === 'rtsp' && (
         <input style={{ ...inputStyle, fontFamily: 'monospace', marginBottom: 12 }}
           placeholder="rtsp://192.168.1.x:554/stream"
           value={rtsp} onChange={e => setRtsp(e.target.value)} />
+      )}
+
+      {srcType === 'upload' && (
+        <div style={{ marginBottom: 12 }}>
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
+            padding: '9px 10px', borderRadius: 8, border: '1px solid #e2e8f0',
+            background: '#fff', fontSize: 12, color: file ? '#111' : '#94a3b8',
+          }}>
+            <span style={{ fontSize: 14 }}>🎞</span>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {file ? `${file.name} (${(file.size / 1e6).toFixed(1)} MB)` : 'Choose surveillance video…'}
+            </span>
+            <input type="file" accept=".mp4,.avi,.mov,.mkv,video/*" style={{ display: 'none' }}
+              onChange={e => setFile(e.target.files?.[0] || null)} />
+          </label>
+          <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 4 }}>
+            MP4 / AVI / MOV / MKV · max 500 MB · analysed like a live camera
+          </div>
+          {uploadPct !== null && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ height: 6, borderRadius: 3, background: '#ede9fe', overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', width: `${uploadPct}%`, background: '#7c3aed',
+                  borderRadius: 3, transition: 'width 0.2s',
+                }} />
+              </div>
+              <div style={{ fontSize: 10, color: '#7c3aed', marginTop: 3, fontWeight: 600 }}>
+                Uploading… {uploadPct}%
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {error && (
@@ -105,7 +170,8 @@ function AddCameraForm({ locationId, token, onCreated, onCancel }) {
           background: '#7c3aed', color: '#fff', fontSize: 12, fontWeight: 600,
           opacity: loading ? 0.6 : 1,
         }}>
-          {loading ? 'Creating…' : 'Create Camera'}
+          {loading ? (srcType === 'upload' ? 'Uploading…' : 'Creating…')
+                   : (srcType === 'upload' ? 'Upload & Create' : 'Create Camera')}
         </button>
         <button onClick={onCancel} style={{
           padding: '7px 14px', borderRadius: 8, border: '1px solid #e2e8f0',
@@ -121,9 +187,31 @@ function CameraCard({ cam, token, onDeleted }) {
   const [active,  setActive]  = useState(cam.is_active)
   const [loading, setLoading] = useState(false)
   const [imgErr,  setImgErr]  = useState(false)
+  // Uploaded-video processing state: {progress, finished, analyzed}
+  const [fileState, setFileState] = useState(null)
   const imgRef = useRef(null)
   const retryTimerRef = useRef(null)
   const streamUrl = `${API}/camera/stream/${cam.id}`
+  const isFile = isFileSource(cam.source)
+
+  // Poll processing progress for uploaded videos while running
+  useEffect(() => {
+    if (!isFile || !active) return
+    const poll = async () => {
+      try {
+        const { data } = await axios.get(`${API}/camera/status`)
+        const me = (data.cameras || []).find(c => c.camera_id === cam.id)
+        if (me) {
+          setFileState({ progress: me.progress || 0, finished: !!me.finished, analyzed: me.analyzed_frames || 0 })
+        }
+      } catch { /* keep last state */ }
+    }
+    poll()
+    const iv = setInterval(poll, 2000)
+    return () => clearInterval(iv)
+  }, [isFile, active, cam.id])
+
+  const finished = fileState?.finished === true
 
   // Auto-retry stream every 3 seconds on error
   useEffect(() => {
@@ -143,7 +231,9 @@ function CameraCard({ cam, token, onDeleted }) {
     try {
       await axios.post(`${API}/camera/start`, { camera_id: cam.id },
         { headers: { Authorization: `Bearer ${token}` } })
-      setActive(true); setImgErr(false)
+      setActive(true); setImgErr(false); setFileState(null)
+      // Restart the MJPEG stream (a replayed video needs a fresh connection)
+      if (imgRef.current) imgRef.current.src = streamUrl + '?t=' + Date.now()
     } catch (e) {
       alert(e.response?.data?.detail || 'Cannot start camera.')
     } finally { setLoading(false) }
@@ -185,14 +275,31 @@ function CameraCard({ cam, token, onDeleted }) {
               style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
               onError={() => setImgErr(true)} />
           )}
-          {/* LIVE badge */}
+          {/* Status badge: LIVE for cameras, PROCESSING/FINISHED for videos */}
           <div style={{
             position: 'absolute', top: 8, left: 8, display: 'flex', alignItems: 'center', gap: 4,
             background: 'rgba(0,0,0,0.55)', borderRadius: 20, padding: '3px 8px',
           }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block', animation: 'pulse 1.5s infinite' }} />
-            <span style={{ color: '#fff', fontSize: 10, fontWeight: 600 }}>LIVE</span>
+            <span style={{
+              width: 6, height: 6, borderRadius: '50%', display: 'inline-block',
+              background: finished ? '#f59e0b' : isFile ? '#818cf8' : '#22c55e',
+              animation: finished ? 'none' : 'pulse 1.5s infinite',
+            }} />
+            <span style={{ color: '#fff', fontSize: 10, fontWeight: 600 }}>
+              {finished ? 'FINISHED'
+                : isFile ? `PROCESSING ${Math.round((fileState?.progress || 0) * 100)}%`
+                : 'LIVE'}
+            </span>
           </div>
+          {/* Video progress bar along the bottom edge */}
+          {isFile && !finished && (
+            <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, background: 'rgba(255,255,255,0.15)' }}>
+              <div style={{
+                height: '100%', width: `${(fileState?.progress || 0) * 100}%`,
+                background: '#818cf8', transition: 'width 0.5s',
+              }} />
+            </div>
+          )}
         </div>
       )}
 
@@ -213,17 +320,27 @@ function CameraCard({ cam, token, onDeleted }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, marginTop: 2 }}>
             <span style={{
               width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-              background: active ? '#22c55e' : '#d1d5db',
+              background: finished ? '#f59e0b' : active ? '#22c55e' : '#d1d5db',
             }} />
-            <span style={{ fontSize: 11, color: active ? '#16a34a' : '#9ca3af', fontWeight: 500 }}>
-              {active ? 'Active' : 'Inactive'}
+            <span style={{ fontSize: 11, fontWeight: 500,
+              color: finished ? '#d97706' : active ? '#16a34a' : '#9ca3af' }}>
+              {finished ? `Finished · ${fileState?.analyzed ?? 0} frames analysed`
+                : active ? (isFile ? 'Processing' : 'Active') : 'Inactive'}
             </span>
           </div>
         </div>
 
         {/* Action row */}
         <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-          {active ? (
+          {finished ? (
+            <button onClick={start} disabled={loading} style={{
+              flex: 1, padding: '7px 0', borderRadius: 8, border: 'none', cursor: 'pointer',
+              background: loading ? '#fef3c7' : '#f59e0b', color: '#fff',
+              fontSize: 12, fontWeight: 600, opacity: loading ? 0.7 : 1, transition: 'opacity 0.2s',
+            }}>
+              {loading ? 'Starting…' : '↺ Replay Video'}
+            </button>
+          ) : active ? (
             <button onClick={stop} disabled={loading} style={{
               flex: 1, padding: '7px 0', borderRadius: 8, border: 'none', cursor: 'pointer',
               background: loading ? '#fee2e2' : '#ef4444', color: '#fff',

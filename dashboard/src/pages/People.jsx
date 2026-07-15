@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import axios from 'axios'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -31,7 +32,66 @@ const TYPE_COLORS = {
   unknown: { bg: '#f0f0f0',   fg: '#888' },
 }
 
-function PersonRow({ p, onSaved }) {
+// Appearance gallery: the person's captured frames from cameras/videos
+function PersonAppearances({ code }) {
+  const [detail, setDetail] = useState(null)
+  const [error,  setError]  = useState(false)
+
+  useEffect(() => {
+    axios.get(`${API}/persons/${code}`)
+      .then(r => setDetail(r.data))
+      .catch(() => setError(true))
+  }, [code])
+
+  if (error) return (
+    <div style={{ padding: '10px 14px 14px 70px', fontSize: 11, color: '#dc2626' }}>
+      Could not load appearances.
+    </div>
+  )
+  if (!detail) return (
+    <div style={{ padding: '10px 14px 14px 70px', fontSize: 11, color: '#bbb' }}>
+      Loading appearances…
+    </div>
+  )
+
+  const shots = (detail.appearances || []).filter(a => a.snapshot)
+  return (
+    <div style={{ padding: '2px 14px 14px 70px', background: '#fbfbfc' }}>
+      <div style={{ fontSize: 11, color: '#888', margin: '8px 0 8px' }}>
+        {detail.total_sightings} appearance{detail.total_sightings === 1 ? '' : 's'}
+        {detail.first_seen_at && (
+          <> · first seen {new Date(detail.first_seen_at + 'Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</>
+        )}
+      </div>
+      {shots.length === 0 ? (
+        <div style={{ fontSize: 11, color: '#bbb' }}>
+          No captured frames yet — frames are saved each time this person is sighted.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {shots.slice(-12).reverse().map((a, i) => (
+            <div key={i} style={{ width: 92 }}>
+              <div style={{
+                width: 92, height: 92, borderRadius: 8, overflow: 'hidden',
+                background: '#f0f0f0', border: '0.5px solid #e8e8e8',
+              }}>
+                <img src={`${API}/${a.snapshot}`} alt=""
+                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                     onError={e => { e.target.parentElement.style.display = 'none' }} />
+              </div>
+              <div style={{ fontSize: 9, color: '#94a3b8', marginTop: 3, lineHeight: 1.4 }}>
+                {a.seen_at ? new Date(a.seen_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—'}
+                <br />{a.camera_id || a.location_name || ''}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PersonRow({ p, onSaved, expanded, onToggle }) {
   const [editing, setEditing] = useState(false)
   const [name, setName]       = useState(p.display_name || '')
   const [saving, setSaving]   = useState(false)
@@ -63,9 +123,10 @@ function PersonRow({ p, onSaved }) {
   const photoUrl = p.photo_path ? `${API}/${p.photo_path.replace(/^snapshots\//, 'snapshots/')}` : null
 
   return (
-    <div style={{
+    <div style={{ borderBottom: '0.5px solid #f7f8fa', background: expanded ? '#fbfbfc' : 'transparent' }}>
+    <div onClick={onToggle} style={{
       display: 'flex', alignItems: 'center', gap: 12,
-      padding: '10px 14px', borderBottom: '0.5px solid #f7f8fa',
+      padding: '10px 14px', cursor: 'pointer',
     }}>
       {/* Photo */}
       <div style={{
@@ -88,7 +149,7 @@ function PersonRow({ p, onSaved }) {
       {/* Name + code */}
       <div style={{ flex: 1, minWidth: 0 }}>
         {editing ? (
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
             <input
               autoFocus value={name}
               onChange={e => setName(e.target.value)}
@@ -114,7 +175,7 @@ function PersonRow({ p, onSaved }) {
             <span style={{ fontSize: 13, fontWeight: 500, color: '#111' }}>
               {p.display_name || <span style={{ color: '#bbb' }}>Unnamed</span>}
             </span>
-            <button onClick={() => { setName(p.display_name || ''); setEditing(true) }} title="Rename" style={{
+            <button onClick={e => { e.stopPropagation(); setName(p.display_name || ''); setEditing(true) }} title="Rename" style={{
               border: 'none', background: 'transparent', cursor: 'pointer',
               color: '#bbb', fontSize: 11, padding: 2, fontFamily: 'inherit',
             }}>✎</button>
@@ -128,6 +189,7 @@ function PersonRow({ p, onSaved }) {
       {/* Type selector */}
       <select
         value={p.person_type || 'unknown'}
+        onClick={e => e.stopPropagation()}
         onChange={e => setType(e.target.value)}
         style={{
           fontSize: 11, fontWeight: 500, padding: '3px 6px', borderRadius: 6,
@@ -151,6 +213,15 @@ function PersonRow({ p, onSaved }) {
             : 'Never seen'}
         </div>
       </div>
+
+      {/* Expand chevron */}
+      <span style={{
+        fontSize: 10, color: '#bbb', flexShrink: 0,
+        transform: expanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s',
+      }}>▶</span>
+    </div>
+
+    {expanded && <PersonAppearances code={p.unique_code} />}
     </div>
   )
 }
@@ -158,6 +229,9 @@ function PersonRow({ p, onSaved }) {
 export default function People() {
   const [persons, setPersons] = useState(null)
   const [query,   setQuery]   = useState('')
+  const [searchParams, setSearchParams] = useSearchParams()
+  // ?code=SDT-0001 (from Photo Search) opens that person's appearances
+  const expandedCode = searchParams.get('code')
 
   const fetchPersons = () => {
     axios.get(`${API}/persons`).then(r => setPersons(r.data)).catch(() => setPersons([]))
@@ -168,6 +242,10 @@ export default function People() {
     const iv = setInterval(fetchPersons, 10000)
     return () => clearInterval(iv)
   }, [])
+
+  const toggle = (code) => {
+    setSearchParams(code === expandedCode ? {} : { code }, { replace: true })
+  }
 
   const filtered = (persons || []).filter(p => {
     if (!query) return true
@@ -205,7 +283,9 @@ export default function People() {
               {query ? 'No matches' : 'No people registered yet — start a camera and step in front of it'}
             </div>
           ) : filtered.map(p => (
-            <PersonRow key={p.unique_code} p={p} onSaved={fetchPersons} />
+            <PersonRow key={p.unique_code} p={p} onSaved={fetchPersons}
+              expanded={p.unique_code === expandedCode}
+              onToggle={() => toggle(p.unique_code)} />
           ))}
         </div>
       </div>

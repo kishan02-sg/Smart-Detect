@@ -52,7 +52,8 @@ Thumbs.db
 # Antigravity / brain
 brain/
 
-# Snapshots & temp
+# Snapshots, uploaded videos & temp
 snapshots/
+uploads/
 check_imports.py
 fix_deepsort.py
